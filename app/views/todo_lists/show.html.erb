@@ -1,0 +1,37 @@
+<%= link_to 'Back to Todo Lists', todo_lists_path %>
+
+<h1><%= @todo_list.name %></h1>
+
+<% flash.each do |type, message| %>
+  <p class="flash-<%= type %>"><%= message %></p>
+<% end %>
+
+<%= turbo_stream_from @todo_list %>
+
+<div data-controller="mark-all">
+  <p><%= @pending_count %> pending of <%= @items_count %> items</p>
+
+  <%= button_to 'Mark all', complete_all_todo_list_path(@todo_list),
+        disabled: @todo_list.mark_all_running?,
+        form: { data: { action: 'turbo:submit-start->mark-all#submitStart turbo:submit-end->mark-all#submitEnd' } },
+        data: { mark_all_target: 'button' } %>
+
+  <%= render 'mark_all_status', todo_list: @todo_list,
+        state: @todo_list.mark_all_running? ? :running : :idle %>
+
+  <%= turbo_frame_tag 'todo_items', data: { mark_all_target: 'frame' } do %>
+    <ul>
+      <%= render partial: 'todo_item', collection: @todo_items %>
+    </ul>
+
+    <nav>
+      <% if @page > 1 %>
+        <%= link_to 'Previous', todo_list_path(@todo_list, page: @page - 1), data: { turbo_action: 'advance' } %>
+      <% end %>
+      Page <%= @page %> of <%= @total_pages %>
+      <% if @page < @total_pages %>
+        <%= link_to 'Next', todo_list_path(@todo_list, page: @page + 1), data: { turbo_action: 'advance' } %>
+      <% end %>
+    </nav>
+  <% end %>
+</div>

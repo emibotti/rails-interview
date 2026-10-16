@@ -1,0 +1,22 @@
+<% processed = local_assigns[:processed]
+   total = local_assigns[:total] %>
+<div id="<%= dom_id(todo_list, :mark_all_status) %>" data-mark-all-target="status" data-state="<%= state %>">
+  <% case state.to_s %>
+  <% when 'running' %>
+    <% if total %>
+      <progress value="<%= processed %>" max="<%= [total, 1].max %>"></progress>
+      <%= processed %> / <%= total %>
+    <% else %>
+      <progress></progress> Marking all items as completed...
+    <% end %>
+  <% when 'done' %>
+    <% if total %>
+      <progress value="<%= total %>" max="<%= [total, 1].max %>"></progress>
+      Done: <%= processed %> items marked as completed.
+    <% else %>
+      All items are already completed.
+    <% end %>
+  <% when 'failed' %>
+    Marking all items failed. Please try again.
+  <% end %>
+</div>
