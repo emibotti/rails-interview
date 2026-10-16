@@ -38,6 +38,59 @@ describe 'Todo lists', type: :request do
       expect(mark_all_button['disabled']).to be_nil
     end
 
+    describe 'checkboxes' do
+      let!(:done_item) { todo_list.todo_items.create!(name: 'Done', completed: true) }
+      let!(:pending_item) { todo_list.todo_items.create!(name: 'Pending') }
+
+      it 'renders a checkbox per item reflecting completed' do
+        get todo_list_path(todo_list)
+
+        expect(checkbox(done_item)['checked']).not_to be_nil
+        expect(checkbox(pending_item)['checked']).to be_nil
+      end
+
+      it 'wires every item to the todo-item controller with its update url' do
+        get todo_list_path(todo_list)
+
+        row = html.at_css("li##{ActionView::RecordIdentifier.dom_id(pending_item)}")
+        expect(row['data-controller']).to eq('todo-item')
+        expect(row['data-todo-item-url-value']).to eq(todo_list_todo_item_path(todo_list, pending_item))
+        expect(row['data-completed']).to eq('false')
+        expect(checkbox(pending_item)['data-action']).to eq('todo-item#toggle')
+      end
+
+      it 'shows the pending counter inside the items frame' do
+        get todo_list_path(todo_list)
+
+        counter = html.at_css('turbo-frame#todo_items [data-mark-all-target="pending"]')
+        expect(counter.text.strip).to eq('1')
+        expect(counter['data-count']).to eq('1')
+      end
+
+      it 'reflects the changes made through the checkbox endpoint' do
+        patch todo_list_todo_item_path(todo_list, pending_item), params: { completed: true }, as: :json,
+          headers: { 'Accept' => 'application/json' }
+        patch todo_list_todo_item_path(todo_list, done_item), params: { completed: false }, as: :json,
+          headers: { 'Accept' => 'application/json' }
+
+        get todo_list_path(todo_list)
+
+        expect(checkbox(pending_item)['checked']).not_to be_nil
+        expect(checkbox(done_item)['checked']).to be_nil
+      end
+
+      it 'shows every checkbox checked after a mark all' do
+        perform_enqueued_jobs do
+          post complete_all_todo_list_path(todo_list), headers: { 'Accept' => 'text/vnd.turbo-stream.html, text/html' }
+        end
+
+        get todo_list_path(todo_list)
+
+        expect(html.css('turbo-frame#todo_items input[type=checkbox]').map { |c| c['checked'] }).to all(be_present)
+        expect(html.at_css('[data-mark-all-target="pending"]').text.strip).to eq('0')
+      end
+    end
+
     describe 'pagination' do
       let!(:items) { Array.new(30) { |i| todo_list.todo_items.create!(name: "Item #{i + 1}") } }
 
@@ -208,6 +261,10 @@ describe 'Todo lists', type: :request do
 
   def mark_all_button
     html.at_css("form[action='#{complete_all_todo_list_path(todo_list)}'] button")
+  end
+
+  def checkbox(item)
+    html.at_css("li##{ActionView::RecordIdentifier.dom_id(item)} input[type=checkbox]")
   end
 
   def item_names

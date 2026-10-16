@@ -1,3 +1,10 @@
-<li id="<%= dom_id(todo_item) %>">
-  <%= todo_item.completed ? '[x]' : '[ ]' %> #<%= todo_item.id %> | <%= todo_item.name %>
+<li id="<%= dom_id(todo_item) %>"
+    data-controller="todo-item"
+    data-todo-item-url-value="<%= todo_list_todo_item_path(todo_item.todo_list_id, todo_item) %>"
+    data-completed="<%= todo_item.completed %>">
+  <label>
+    <%= check_box_tag nil, '1', todo_item.completed,
+          data: { todo_item_target: 'checkbox', action: 'todo-item#toggle' } %>
+    #<%= todo_item.id %> | <%= todo_item.name %>
+  </label>
 </li>

@@ -1,0 +1,4 @@
+li[data-completed="true"] label {
+  text-decoration: line-through;
+  opacity: 0.6;
+}

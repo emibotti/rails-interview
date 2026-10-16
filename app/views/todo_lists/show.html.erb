@@ -8,9 +8,7 @@
 
 <%= turbo_stream_from @todo_list %>
 
-<div data-controller="mark-all">
-  <p><%= @pending_count %> pending of <%= @items_count %> items</p>
-
+<div data-controller="mark-all" data-action="todo-item:toggled->mark-all#updatePending">
   <%= button_to 'Mark all', complete_all_todo_list_path(@todo_list),
         disabled: @todo_list.mark_all_running?,
         form: { data: { action: 'turbo:submit-start->mark-all#submitStart turbo:submit-end->mark-all#submitEnd' } },
@@ -20,6 +18,12 @@
         state: @todo_list.mark_all_running? ? :running : :idle %>
 
   <%= turbo_frame_tag 'todo_items', data: { mark_all_target: 'frame' } do %>
+    <%# Inside the frame so it is refreshed together with the items. %>
+    <p>
+      <span data-mark-all-target="pending" data-count="<%= @pending_count %>"><%= @pending_count %></span>
+      pending of <%= @items_count %> items
+    </p>
+
     <ul>
       <%= render partial: 'todo_item', collection: @todo_items %>
     </ul>

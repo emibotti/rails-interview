@@ -3,7 +3,7 @@ import { Controller } from "@hotwired/stimulus"
 // Keeps the "Mark all" button in sync with the status broadcast by
 // CompleteAllTodoItemsJob, and reloads the items frame when it finishes.
 export default class extends Controller {
-  static targets = ["button", "status", "frame"]
+  static targets = ["button", "status", "frame", "pending"]
 
   submitStart() {
     this.buttonTarget.disabled = true
@@ -16,6 +16,16 @@ export default class extends Controller {
     const accepted = event.detail.fetchResponse?.statusCode === 202
 
     this.buttonTarget.disabled = (accepted && !this.finishedSinceSubmit) || this.state === "running"
+  }
+
+  // Keeps the pending counter in sync with the checkboxes (optimistic UI).
+  updatePending(event) {
+    if (!this.hasPendingTarget) return
+
+    const count = Math.max(0, Number(this.pendingTarget.dataset.count) + event.detail.delta)
+
+    this.pendingTarget.dataset.count = count
+    this.pendingTarget.textContent = count
   }
 
   statusTargetConnected(element) {
