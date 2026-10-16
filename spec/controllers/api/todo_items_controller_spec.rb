@@ -22,7 +22,7 @@ describe Api::TodoItemsController do
 
       expect(response.status).to eq(200)
       expect(body.map { |i| i['id'] }).to eq([todo_item.id])
-      expect(body[0].keys).to match_array(%w[id name completed todo_list_id created_at updated_at])
+      expect(body[0].keys).to match_array(%w[id name description completed todo_list_id created_at updated_at])
     end
 
     it 'returns an empty array when the list has no items' do
@@ -38,6 +38,76 @@ describe Api::TodoItemsController do
       get :index, params: { todo_list_id: 0 }, format: :json
 
       expect(response.status).to eq(404)
+    end
+
+    describe 'pagination' do
+      let(:page_params) { { todo_list_id: todo_list.id } }
+
+      let(:all_ids) { todo_list.todo_items.order(:id).pluck(:id) }
+
+      before { 29.times { |i| todo_list.todo_items.create!(name: "Extra #{i}") } }
+
+      it 'returns the first 25 records ordered by id by default' do
+        get :index, params: page_params, format: :json
+
+        expect(response.status).to eq(200)
+        expect(JSON.parse(response.body).map { |r| r['id'] }).to eq(all_ids.first(25))
+      end
+
+      it 'returns the remaining records on the next page' do
+        get :index, params: page_params.merge(page: 2), format: :json
+
+        expect(JSON.parse(response.body).map { |r| r['id'] }).to eq(all_ids.last(5))
+      end
+
+      it 'returns an empty array for a page beyond the last one' do
+        get :index, params: page_params.merge(page: 3), format: :json
+
+        expect(response.status).to eq(200)
+        expect(JSON.parse(response.body)).to eq([])
+      end
+
+      it 'falls back to the first page for invalid page values' do
+        ['0', '-1', 'abc', ''].each do |value|
+          get :index, params: page_params.merge(page: value), format: :json
+
+          expect(JSON.parse(response.body).map { |r| r['id'] }).to eq(all_ids.first(25)), "page=#{value.inspect}"
+          expect(response.headers['X-Page']).to eq('1')
+        end
+      end
+
+      it 'sends the pagination metadata in headers' do
+        get :index, params: page_params, format: :json
+
+        expect(response.headers['X-Total-Count']).to eq('30')
+        expect(response.headers['X-Total-Pages']).to eq('2')
+        expect(response.headers['X-Page']).to eq('1')
+        expect(response.headers['X-Per-Page']).to eq('25')
+      end
+
+      it 'sends first, last and next links on the first page' do
+        get :index, params: page_params, format: :json
+
+        links = response.headers['Link']
+        expect(links).to include('page=2>; rel="next"', 'page=1>; rel="first"', 'page=2>; rel="last"')
+        expect(links).not_to include('rel="prev"')
+      end
+
+      it 'sends first, last and prev links on the last page' do
+        get :index, params: page_params.merge(page: 2), format: :json
+
+        links = response.headers['Link']
+        expect(links).to include('page=1>; rel="prev"', 'page=2>; rel="last"')
+        expect(links).not_to include('rel="next"')
+      end
+
+      it 'keeps the response a plain array with the same fields' do
+        get :index, params: page_params, format: :json
+
+        body = JSON.parse(response.body)
+        expect(body).to be_an(Array)
+        expect(body.first.keys).to match_array(%w[id name description completed todo_list_id created_at updated_at])
+      end
     end
   end
 
@@ -78,7 +148,7 @@ describe Api::TodoItemsController do
         post :create, params: params, format: :json
       }.to change { todo_list.todo_items.count }.by(1)
 
-      expect(response.status).to eq(201)
+      expect(response.status).to eq(200)
       expect(body['name']).to eq('New item')
       expect(body['completed']).to eq(false)
       expect(body['todo_list_id']).to eq(todo_list.id)
@@ -87,15 +157,36 @@ describe Api::TodoItemsController do
     it 'accepts completed: true' do
       post :create, params: params.merge(completed: true), format: :json
 
-      expect(response.status).to eq(201)
+      expect(response.status).to eq(200)
       expect(body['completed']).to eq(true)
     end
 
     it 'accepts params nested under todo_item' do
       post :create, params: { todo_list_id: todo_list.id, todo_item: { name: 'Nested' } }, format: :json
 
-      expect(response.status).to eq(201)
+      expect(response.status).to eq(200)
       expect(body['name']).to eq('Nested')
+    end
+
+    it 'accepts description as an alias of name' do
+      post :create, params: { todo_list_id: todo_list.id, description: 'From description' }, format: :json
+
+      expect(response.status).to eq(200)
+      expect(body['name']).to eq('From description')
+      expect(body['description']).to eq('From description')
+    end
+
+    it 'prefers name over description when both are sent' do
+      post :create, params: params.merge(description: 'Ignored'), format: :json
+
+      expect(body['name']).to eq('New item')
+      expect(body['description']).to eq('New item')
+    end
+
+    it 'returns 422 with a blank description' do
+      post :create, params: { todo_list_id: todo_list.id, description: '' }, format: :json
+
+      expect(response.status).to eq(422)
     end
 
     it 'returns 422 without a name' do
@@ -122,7 +213,7 @@ describe Api::TodoItemsController do
     it 'ignores non permitted params' do
       post :create, params: params.merge(todo_list_id: todo_list.id, id: 9999, created_at: 1.year.ago), format: :json
 
-      expect(response.status).to eq(201)
+      expect(response.status).to eq(200)
       expect(body['id']).not_to eq(9999)
       expect(body['todo_list_id']).to eq(todo_list.id)
     end
@@ -137,6 +228,20 @@ describe Api::TodoItemsController do
       expect(response.status).to eq(200)
       expect(body['name']).to eq('Renamed')
       expect(todo_item.reload.name).to eq('Renamed')
+    end
+
+    it 'updates the name through the description alias' do
+      patch :update, params: base.merge(description: 'Renamed via description'), format: :json
+
+      expect(response.status).to eq(200)
+      expect(body['name']).to eq('Renamed via description')
+      expect(todo_item.reload.name).to eq('Renamed via description')
+    end
+
+    it 'does not change the name when only completed is sent' do
+      patch :update, params: base.merge(completed: true), format: :json
+
+      expect(todo_item.reload.name).to eq('Write specs')
     end
 
     it 'marks the item as completed' do

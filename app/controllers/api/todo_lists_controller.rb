@@ -1,5 +1,7 @@
 module Api
   class TodoListsController < ApplicationController
+    include Paginable
+
     protect_from_forgery with: :null_session
 
     before_action :set_todo_list, only: %i[show update destroy]
@@ -8,7 +10,7 @@ module Api
 
     # GET /api/todolists
     def index
-      @todo_lists = TodoList.all
+      @todo_lists = paginate(TodoList.order(:id))
 
       respond_to :json
     end
@@ -25,7 +27,7 @@ module Api
       respond_to do |format|
         format.json do
           if @todo_list.save
-            render :show, status: :created
+            render :show
           else
             render_errors(@todo_list)
           end

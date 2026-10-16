@@ -1,5 +1,7 @@
 module Api
   class TodoItemsController < ApplicationController
+    include Paginable
+
     protect_from_forgery with: :null_session
 
     before_action :set_todo_list
@@ -9,7 +11,7 @@ module Api
 
     # GET /api/todolists/:todo_list_id/todoitems
     def index
-      @todo_items = @todo_list.todo_items.order(:id)
+      @todo_items = paginate(@todo_list.todo_items.order(:id))
 
       respond_to :json
     end
@@ -26,7 +28,7 @@ module Api
       respond_to do |format|
         format.json do
           if @todo_item.save
-            render :show, status: :created
+            render :show
           else
             render_errors(@todo_item)
           end
@@ -67,8 +69,18 @@ module Api
       @todo_item = @todo_list.todo_items.find(params[:id])
     end
 
+    ATTRIBUTES = %i[name description completed].freeze
+
+    # Params can come flat or nested under `todo_item`. For JSON bodies Rails
+    # wraps only the model's columns under `todo_item`, so `description` stays
+    # at the root: read both, the nested ones win.
+    #
+    # `description` is accepted as an alias of `name`; `name` wins if both are sent.
     def todo_item_params
-      params.fetch(:todo_item, params).permit(:name, :completed)
+      permitted = params.permit(*ATTRIBUTES).merge(params.fetch(:todo_item, {}).permit(*ATTRIBUTES))
+      description = permitted.delete(:description)
+      permitted[:name] = description if permitted[:name].nil? && !description.nil?
+      permitted
     end
 
     def render_errors(record)

@@ -36,6 +36,81 @@ describe Api::TodoListsController do
     end
   end
 
+  describe 'GET index pagination' do
+    let!(:todo_list) { TodoList.create!(name: 'Setup RoR project') }
+
+    describe 'pagination' do
+      let(:page_params) { {} }
+
+      let(:all_ids) { TodoList.order(:id).pluck(:id) }
+
+      before { TodoList.where.not(id: todo_list.id).delete_all
+        29.times { |i| TodoList.create!(name: "Extra #{i}") } }
+
+      it 'returns the first 25 records ordered by id by default' do
+        get :index, params: page_params, format: :json
+
+        expect(response.status).to eq(200)
+        expect(JSON.parse(response.body).map { |r| r['id'] }).to eq(all_ids.first(25))
+      end
+
+      it 'returns the remaining records on the next page' do
+        get :index, params: page_params.merge(page: 2), format: :json
+
+        expect(JSON.parse(response.body).map { |r| r['id'] }).to eq(all_ids.last(5))
+      end
+
+      it 'returns an empty array for a page beyond the last one' do
+        get :index, params: page_params.merge(page: 3), format: :json
+
+        expect(response.status).to eq(200)
+        expect(JSON.parse(response.body)).to eq([])
+      end
+
+      it 'falls back to the first page for invalid page values' do
+        ['0', '-1', 'abc', ''].each do |value|
+          get :index, params: page_params.merge(page: value), format: :json
+
+          expect(JSON.parse(response.body).map { |r| r['id'] }).to eq(all_ids.first(25)), "page=#{value.inspect}"
+          expect(response.headers['X-Page']).to eq('1')
+        end
+      end
+
+      it 'sends the pagination metadata in headers' do
+        get :index, params: page_params, format: :json
+
+        expect(response.headers['X-Total-Count']).to eq('30')
+        expect(response.headers['X-Total-Pages']).to eq('2')
+        expect(response.headers['X-Page']).to eq('1')
+        expect(response.headers['X-Per-Page']).to eq('25')
+      end
+
+      it 'sends first, last and next links on the first page' do
+        get :index, params: page_params, format: :json
+
+        links = response.headers['Link']
+        expect(links).to include('page=2>; rel="next"', 'page=1>; rel="first"', 'page=2>; rel="last"')
+        expect(links).not_to include('rel="prev"')
+      end
+
+      it 'sends first, last and prev links on the last page' do
+        get :index, params: page_params.merge(page: 2), format: :json
+
+        links = response.headers['Link']
+        expect(links).to include('page=1>; rel="prev"', 'page=2>; rel="last"')
+        expect(links).not_to include('rel="next"')
+      end
+
+      it 'keeps the response a plain array with the same fields' do
+        get :index, params: page_params, format: :json
+
+        body = JSON.parse(response.body)
+        expect(body).to be_an(Array)
+        expect(body.first.keys).to match_array(%w[id name])
+      end
+    end
+  end
+
   describe 'GET show' do
     let!(:todo_list) { TodoList.create!(name: 'Setup RoR project') }
 
@@ -67,7 +142,7 @@ describe Api::TodoListsController do
       }.to change(TodoList, :count).by(1)
 
       body = JSON.parse(response.body)
-      expect(response.status).to eq(201)
+      expect(response.status).to eq(200)
       expect(body['name']).to eq('New list')
       expect(body.keys).to match_array(%w[id name])
     end
@@ -75,7 +150,7 @@ describe Api::TodoListsController do
     it 'accepts params nested under todo_list' do
       post :create, params: { todo_list: { name: 'Nested' } }, format: :json
 
-      expect(response.status).to eq(201)
+      expect(response.status).to eq(200)
       expect(JSON.parse(response.body)['name']).to eq('Nested')
     end
 
@@ -97,7 +172,7 @@ describe Api::TodoListsController do
     it 'ignores non permitted params' do
       post :create, params: { name: 'List', id: 9999 }, format: :json
 
-      expect(response.status).to eq(201)
+      expect(response.status).to eq(200)
       expect(JSON.parse(response.body)['id']).not_to eq(9999)
     end
   end
