@@ -35,6 +35,7 @@ Tests are RSpec controller specs (`render_views` enabled so Jbuilder output is c
 - Both API controllers use `protect_from_forgery with: :null_session` so external clients can POST/PATCH/DELETE without a CSRF token.
 - Status codes: `create` 201, `destroy` 204 (no body), invalid data 422 with `{ "errors": { field: [messages] } }`, missing record (list or item) 404 with `{ "error": "Not found" }` via `rescue_from ActiveRecord::RecordNotFound`.
 - Write params are accepted flat (`{ "name": "x" }`) or nested (`{ "todo_item": { "name": "x" } }`); only `name` (and `completed` for items) are permitted.
+- Both `index` actions are paginated through the `Paginable` concern: 25 records per page ordered by `id`, `?page=N` (invalid values fall back to page 1, pages past the end return `[]`). The body stays a plain array; metadata goes in the `X-Total-Count`, `X-Total-Pages`, `X-Page`, `X-Per-Page` and `Link` headers.
 - Jbuilder responses: lists expose `id, name` only (the index shape is a contract); items expose `id, name, completed, todo_list_id, created_at, updated_at`.
 
 ### Models

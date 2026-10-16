@@ -1,5 +1,7 @@
 module Api
   class TodoItemsController < ApplicationController
+    include Paginable
+
     protect_from_forgery with: :null_session
 
     before_action :set_todo_list
@@ -9,7 +11,7 @@ module Api
 
     # GET /api/todolists/:todo_list_id/todoitems
     def index
-      @todo_items = @todo_list.todo_items.order(:id)
+      @todo_items = paginate(@todo_list.todo_items.order(:id))
 
       respond_to :json
     end
