@@ -1,5 +1,5 @@
 class TodoListsController < ApplicationController
-  PER_PAGE = 25
+  PER_PAGE = Paginable::PER_PAGE
 
   before_action :set_todo_list, only: %i[show complete_all]
 
