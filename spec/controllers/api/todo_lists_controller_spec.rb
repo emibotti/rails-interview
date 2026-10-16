@@ -142,7 +142,7 @@ describe Api::TodoListsController do
       }.to change(TodoList, :count).by(1)
 
       body = JSON.parse(response.body)
-      expect(response.status).to eq(201)
+      expect(response.status).to eq(200)
       expect(body['name']).to eq('New list')
       expect(body.keys).to match_array(%w[id name])
     end
@@ -150,7 +150,7 @@ describe Api::TodoListsController do
     it 'accepts params nested under todo_list' do
       post :create, params: { todo_list: { name: 'Nested' } }, format: :json
 
-      expect(response.status).to eq(201)
+      expect(response.status).to eq(200)
       expect(JSON.parse(response.body)['name']).to eq('Nested')
     end
 
@@ -172,7 +172,7 @@ describe Api::TodoListsController do
     it 'ignores non permitted params' do
       post :create, params: { name: 'List', id: 9999 }, format: :json
 
-      expect(response.status).to eq(201)
+      expect(response.status).to eq(200)
       expect(JSON.parse(response.body)['id']).not_to eq(9999)
     end
   end

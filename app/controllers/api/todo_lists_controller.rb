@@ -27,7 +27,7 @@ module Api
       respond_to do |format|
         format.json do
           if @todo_list.save
-            render :show, status: :created
+            render :show
           else
             render_errors(@todo_list)
           end
