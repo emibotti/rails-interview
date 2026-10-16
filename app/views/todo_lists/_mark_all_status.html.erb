@@ -1,22 +1,26 @@
 <% processed = local_assigns[:processed]
    total = local_assigns[:total] %>
-<div id="<%= dom_id(todo_list, :mark_all_status) %>" data-mark-all-target="status" data-state="<%= state %>">
+<div id="<%= dom_id(todo_list, :mark_all_status) %>"
+     class="mark-all-status mark-all-status--<%= state %>"
+     data-mark-all-target="status" data-state="<%= state %>"
+     role="status" aria-live="polite">
   <% case state.to_s %>
   <% when 'running' %>
     <% if total %>
-      <progress value="<%= processed %>" max="<%= [total, 1].max %>"></progress>
-      <%= processed %> / <%= total %>
+      <progress class="progress" value="<%= processed %>" max="<%= [total, 1].max %>"></progress>
+      <p class="mark-all-status__text"><%= processed %> / <%= total %></p>
     <% else %>
-      <progress></progress> Marking all items as completed...
+      <progress class="progress"></progress>
+      <p class="mark-all-status__text">Marking all items as completed...</p>
     <% end %>
   <% when 'done' %>
     <% if total %>
-      <progress value="<%= total %>" max="<%= [total, 1].max %>"></progress>
-      Done: <%= processed %> items marked as completed.
+      <progress class="progress" value="<%= total %>" max="<%= [total, 1].max %>"></progress>
+      <p class="mark-all-status__text">Done: <%= processed %> items marked as completed.</p>
     <% else %>
-      All items are already completed.
+      <p class="mark-all-status__text">All items are already completed.</p>
     <% end %>
   <% when 'failed' %>
-    Marking all items failed. Please try again.
+    <p class="mark-all-status__text">Marking all items failed. Please try again.</p>
   <% end %>
 </div>

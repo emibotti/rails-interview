@@ -268,6 +268,6 @@ describe 'Todo lists', type: :request do
   end
 
   def item_names
-    html.css('turbo-frame#todo_items li').map { |li| li.text.split('|').last.strip }
+    html.css('turbo-frame#todo_items li .todo-item__name').map { |name| name.text.strip }
   end
 end

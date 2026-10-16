@@ -1,10 +1,14 @@
 <li id="<%= dom_id(todo_item) %>"
+    class="todo-item"
+    style="--i: <%= local_assigns.fetch(:todo_item_counter, 0) %>"
     data-controller="todo-item"
     data-todo-item-url-value="<%= todo_list_todo_item_path(todo_item.todo_list_id, todo_item) %>"
     data-completed="<%= todo_item.completed %>">
-  <label>
+  <label class="todo-item__label">
     <%= check_box_tag nil, '1', todo_item.completed,
+          class: 'todo-item__checkbox',
           data: { todo_item_target: 'checkbox', action: 'todo-item#toggle' } %>
-    #<%= todo_item.id %> | <%= todo_item.name %>
+    <span class="todo-item__name"><span class="todo-item__text"><%= todo_item.name %></span></span>
+    <span class="todo-item__id">#<%= todo_item.id %></span>
   </label>
 </li>
