@@ -1,32 +1,35 @@
 {
   "name": "crunchloop-rails-interview",
-
   // Dockerfile for the devcontainer
   "build": {
     "dockerfile": "Dockerfile"
   },
-
   // Set the workspace folder
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
-
   // Features to add to the dev container. More info: https://containers.dev/features.
   "features": {},
-
   // Use 'forwardPorts' to make a list of ports inside the container available locally.
-  "forwardPorts": [3000],
-
+  "forwardPorts": [
+    3000
+  ],
+  // Persist Claude Code config (login, settings, history) across rebuilds in a per-project named volume.
+  "mounts": [
+    "source=claude-code-config-${devcontainerId},target=/home/vscode/.claude,type=volume"
+  ],
+  "containerEnv": {
+    "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
+  },
   // Use 'postCreateCommand' to run commands after the container is created.
   "postCreateCommand": "bundle install && bundle exec rake db:setup",
-
   // Configure tool-specific properties.
   "customizations": {
     "vscode": {
       "extensions": [
-        "Postman.postman-for-vscode"
+        "Postman.postman-for-vscode",
+        "anthropic.claude-code"
       ]
     }
   }
-
   // Set `remoteUser` to `root` to connect as root instead. More info: https://aka.ms/vscode-remote/containers/non-root.
   // "remoteUser": "vscode"
 }
