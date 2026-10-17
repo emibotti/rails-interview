@@ -1,0 +1,52 @@
+<%= link_to todo_lists_path, class: 'back-link' do %>
+  <span aria-hidden="true">&larr;</span> Back to Todo Lists
+<% end %>
+
+<% flash.each do |type, message| %>
+  <p class="flash flash--<%= type %>"><%= message %></p>
+<% end %>
+
+<%= turbo_stream_from @todo_list %>
+
+<section class="card todo-card" data-controller="mark-all" data-action="todo-item:toggled->mark-all#updatePending">
+  <header class="todo-card__header">
+    <h1 class="todo-card__title"><%= @todo_list.name %></h1>
+
+    <%= button_to 'Mark all', complete_all_todo_list_path(@todo_list),
+          class: 'button button--primary',
+          disabled: @todo_list.mark_all_running?,
+          form: { class: 'todo-card__action', data: { action: 'turbo:submit-start->mark-all#submitStart turbo:submit-end->mark-all#submitEnd' } },
+          data: { mark_all_target: 'button' } %>
+  </header>
+
+  <%= render 'mark_all_status', todo_list: @todo_list,
+        state: @todo_list.mark_all_running? ? :running : :idle %>
+
+  <%= turbo_frame_tag 'todo_items', data: { mark_all_target: 'frame' } do %>
+    <%# Inside the frame so it is refreshed together with the items. %>
+    <p class="todo-card__summary">
+      <span class="todo-card__pending" data-mark-all-target="pending" data-count="<%= @pending_count %>"><%= @pending_count %></span>
+      pending of <%= @items_count %> items
+    </p>
+
+    <% if @todo_items.any? %>
+      <ul class="todo-list">
+        <%= render partial: 'todo_item', collection: @todo_items %>
+      </ul>
+    <% else %>
+      <p class="empty-state">No items yet.</p>
+    <% end %>
+
+    <nav class="pagination" aria-label="Pagination">
+      <% if @page > 1 %>
+        <%= link_to 'Previous', todo_list_path(@todo_list, page: @page - 1),
+              class: 'button button--ghost button--small pagination__prev', data: { turbo_action: 'advance' } %>
+      <% end %>
+      <span class="pagination__info">Page <%= @page %> of <%= @total_pages %></span>
+      <% if @page < @total_pages %>
+        <%= link_to 'Next', todo_list_path(@todo_list, page: @page + 1),
+              class: 'button button--ghost button--small pagination__next', data: { turbo_action: 'advance' } %>
+      <% end %>
+    </nav>
+  <% end %>
+</section>

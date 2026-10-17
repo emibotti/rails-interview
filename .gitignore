@@ -7,6 +7,8 @@
 # Ignore SQLite3 databases
 rails_interview_development
 rails_interview_test
+rails_interview_development-*
+rails_interview_test-*
 
 # Ignore bundler config.
 /.bundle

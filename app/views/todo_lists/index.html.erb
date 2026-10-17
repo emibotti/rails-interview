@@ -1,9 +1,22 @@
-<%= link_to 'Add Todo List', new_todo_list_path %>
+<header class="page-header">
+  <h1 class="page-title">Todo Lists</h1>
+  <%= link_to 'Add Todo List', new_todo_list_path, class: 'button button--ghost' %>
+</header>
 
-<div>
-  <% @todo_lists.each do |todo_list| %>
-    <div>
-      #<%= todo_list.id %> | <%= todo_list.name %>
-    </div>
+<div class="card">
+  <% if @todo_lists.any? %>
+    <ul class="list-index">
+      <% @todo_lists.each_with_index do |todo_list, index| %>
+        <li class="list-index__item" style="--i: <%= index %>">
+          <%= link_to todo_list_path(todo_list), class: 'list-index__link' do %>
+            <span class="todo-item__id">#<%= todo_list.id %></span>
+            <span class="list-index__name"><%= todo_list.name %></span>
+            <span class="list-index__chevron" aria-hidden="true">&rarr;</span>
+          <% end %>
+        </li>
+      <% end %>
+    </ul>
+  <% else %>
+    <p class="empty-state">No todo lists yet.</p>
   <% end %>
 </div>

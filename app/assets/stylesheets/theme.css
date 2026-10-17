@@ -1,0 +1,67 @@
+/* Design tokens taken from crunchloop.io. */
+@layer theme {
+  :root, :host {
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    --spacing: .0625rem;
+    --breakpoint-sm: 640px;
+    --breakpoint-md: 768px;
+    --breakpoint-lg: 1024px;
+    --breakpoint-xl: 1280px;
+    --blur-md: 12px;
+    --blur-2xl: 40px;
+    --default-transition-duration: 0s;
+    --default-transition-timing-function: cubic-bezier(.215, .61, .355, 1);
+    --default-font-family: Inter, system-ui;
+    --default-mono-font-family: var(--font-mono);
+    --container-xs: 320px;
+    --container-md: 768px;
+    --color-gray-300: oklch(95.2% .004 271.369);
+    --color-gray-400: oklch(86.7% .004 271.363);
+  }
+}
+
+/*
+ * App tokens built on top of them. `--spacing` is a 1px unit, used as
+ * calc(var(--spacing) * N). Durations are our own: crunchloop's
+ * --default-transition-duration is 0s, which would disable every animation.
+ */
+:root {
+  --color-bg: oklch(98.5% .002 271.369);
+  --color-surface: oklch(100% 0 0);
+  --color-track: var(--color-gray-300);
+  --color-border: var(--color-gray-300);
+  --color-border-strong: var(--color-gray-400);
+  --color-text: oklch(21% .006 271.369);
+  --color-text-muted: oklch(55% .01 271.369);
+  --color-accent: var(--color-text);
+  --color-accent-contrast: oklch(100% 0 0);
+  --color-success: oklch(62% .14 152);
+  --color-danger: oklch(58% .19 25);
+
+  --radius-sm: calc(var(--spacing) * 6);
+  --radius-md: calc(var(--spacing) * 10);
+  --radius-lg: calc(var(--spacing) * 16);
+  --radius-full: 9999px;
+
+  --shadow-card: 0 1px 2px oklch(0% 0 0 / .04), 0 12px 32px -16px oklch(0% 0 0 / .16);
+
+  --duration-fast: 150ms;
+  --duration-base: 250ms;
+  --ease: var(--default-transition-timing-function);
+  --ease-spring: cubic-bezier(.34, 1.56, .64, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: oklch(16% .006 271.369);
+    --color-surface: oklch(20% .006 271.369);
+    --color-track: oklch(30% .008 271.369);
+    --color-border: oklch(28% .008 271.369);
+    --color-border-strong: oklch(40% .008 271.369);
+    --color-text: var(--color-gray-300);
+    --color-text-muted: oklch(70% .008 271.369);
+    --color-accent: var(--color-gray-300);
+    --color-accent-contrast: oklch(20% .006 271.369);
+    --shadow-card: 0 1px 2px oklch(0% 0 0 / .3), 0 12px 32px -16px oklch(0% 0 0 / .6);
+  }
+}
