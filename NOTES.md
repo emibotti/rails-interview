@@ -8,12 +8,12 @@ Sections marked _(planned)_ describe decisions already taken whose code is not w
 
 - Two-way, **state-based** sync of `TodoList` and `TodoItem` with the External Todo API.
 - One idempotent sync cycle: snapshot (one `GET`) → link by `source_id` → apply remote changes →
-  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull and push of creates. It is triggered by a debounced job after
+  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull, push of creates and push of updates. It is triggered by a debounced job after
   local changes and by a periodic reconciliation (rake task + cron) as a safety net.
 - Components:
   - `ExternalTodo::*` (`app/services/external_todo/`): HTTP client, mapper and value objects. The only code that knows the external wire format.
   - `Syncable` concern + `sync_*` tables: local change tracking.
-  - `TodoSync::*` (`app/services/todo_sync/`): the sync engine (`Runner`, `Snapshot`, `Linker`, `Puller`, `CreatePusher` so far).
+  - `TodoSync::*` (`app/services/todo_sync/`): the sync engine (`Runner`, `Snapshot`, `Linker`, `Puller`, `CreatePusher`, `UpdatePusher`, `BulkWriter` so far).
   - `FakeExternalTodoApi` (`lib/`): in-memory fake of the external API, used by the specs and for manual runs.
 
 ## Key design decisions
@@ -132,11 +132,29 @@ Each local list without `external_id` is sent with **all** its items in one `POS
   were sent in (with a `warn`), and if that is impossible the list is linked and the items are linked by the Linker next cycle.
 - Everything is saved in one transaction with `synced_version = <version sent>`, never the current one: an edit made while the POST
   was in flight leaves the record dirty, and items created during the POST stay unlinked for the item-creation strategy (step 8).
-- Item links are written with one `UPDATE ... FROM (VALUES ...)` per 500 items instead of one `UPDATE` per item, which matters for
-  lists with 100k items (a CTE is needed because SQLite has no `AS v(columns)` alias for subqueries).
+- Item links are written with `BulkWriter`: one `UPDATE ... FROM (VALUES ...)` per 500 items instead of one `UPDATE` per item, which
+  matters for lists with 100k items (a CTE is needed because SQLite has no `AS v(columns)` alias for subqueries).
 - A `TimeoutError` is counted and the list is left for the next cycle (to be linked if it was created). A `4xx` or `5xx` is counted as a
   failure and the cycle continues with the next list. Backoff and dead letters come in step 10.
 - Trade-off: a list with a huge number of items is one huge request. The plan caps the lists we *recreate* (D9), not the first upload.
+
+### Pushing updates (`TodoSync::UpdatePusher`)
+Dirty linked lists and items (items only if their list is linked) are **compared with the snapshot before anything is sent**:
+
+- Remote already has the same values → no call. The record is marked synced with the snapshot's `updated_at`
+  (`stats["skipped_noop"]`). Items are marked in batches with `BulkWriter`.
+- Otherwise a `PATCH` with **only the fields that differ**. This is what bounds the cost of a mark all: N items, M of them already
+  completed remotely, cost exactly N - M requests (a spec checks it), since the API has no bulk operation.
+- After a successful `PATCH`, `synced_version` is set to the version read **before** the call, with `WHERE synced_version < version`,
+  so an edit made during the request leaves the record dirty and the next cycle sends it (a spec edits the item inside the request).
+- A record missing from the snapshot is skipped (it was deleted remotely; the pull deals with it in step 6). A `404` on `PATCH` means it
+  vanished after the snapshot: the delete wins (D5), the record is removed locally without callbacks (so no tombstone) and a `warn`
+  logs the local version that was dropped.
+- A `422` or a persistent `5xx` is counted in `stats["failures"]` and the record stays dirty; the other records go on.
+- The loop refreshes the lock heartbeat and calls `Thread.pass` every 100 records.
+- Until conflict resolution exists (step 7) a record changed on both sides is simply overwritten with the local value.
+- Not done: bounded concurrency for the `PATCH`es. It is the main lever for huge mark alls, but SQLite's single writer and the GVL make it
+  a measured optimisation rather than a default, so it is listed as future work.
 
 ### Locks with heartbeat
 `SyncState` is a single-row table with `scheduled_at` (debounce mark) and `lock_heartbeat_at`. The lock is taken with a
@@ -181,7 +199,11 @@ Handled so far (each has a spec):
 - Ambiguous POST (created remotely, client saw a timeout): the next cycle links it, with no second POST and no duplicate.
 - Edit made while a POST was in flight: the record stays dirty. Items created meanwhile stay unlinked.
 - Duplicate remote list with our `source_id`: tombstoned. Remote record with our `source_id` and no local row: left alone and logged.
-- A failing POST (422/500) does not stop the other lists.
+- A failing POST (422/500) does not stop the other lists, and neither does a failing PATCH.
+- A cycle with no changes makes exactly one request (the GET).
+- Mark all of N items with M already completed remotely: N - M PATCHes.
+- Edit during a PATCH: the record stays dirty and is sent next cycle.
+- PATCH answered 404: the record is deleted locally without callbacks and logged.
 - Running the pull twice writes nothing; a remote change to a clean record is applied without bumping `local_version`.
 - A record dirty locally is not overwritten by a remote change, and neither is one edited while the pull was running.
 - Remote records with a blank name or no id are skipped, not imported.

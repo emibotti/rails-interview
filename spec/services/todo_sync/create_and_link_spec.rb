@@ -87,7 +87,7 @@ RSpec.describe TodoSync::Runner do
     end
 
     it 'links the items in batches' do
-      stub_const('TodoSync::CreatePusher::UPDATE_BATCH_SIZE', 2)
+      stub_const('TodoSync::BulkWriter::BATCH_SIZE', 2)
 
       sync
 

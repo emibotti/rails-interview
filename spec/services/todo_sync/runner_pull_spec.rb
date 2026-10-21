@@ -137,6 +137,8 @@ RSpec.describe TodoSync::Runner do
     end
 
     it 'does not overwrite a record that is dirty locally' do
+      # Only the pull is under test here; what the push does with the conflict is step 7.
+      allow(TodoSync::UpdatePusher).to receive(:call)
       list.update!(name: 'Local edit')
       known_remote_updated_at = list.remote_updated_at
       external_client.update_todo_list(remote['id'], name: 'Remote edit')

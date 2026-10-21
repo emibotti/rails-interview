@@ -5,8 +5,6 @@ module TodoSync
   # POST is not idempotent and is never retried here: on a timeout the list may
   # exist remotely, and the Linker binds it by source_id in the next cycle.
   class CreatePusher
-    UPDATE_BATCH_SIZE = 500
-
     def self.call(snapshot, run, client:)
       new(run, client).call
     end
@@ -60,7 +58,10 @@ module TodoSync
       TodoList.transaction do
         TodoList.where(id: list.id, external_id: nil).where("synced_version < ?", list.local_version)
                 .update_all(external_id: remote.external_id, remote_updated_at: remote.updated_at, synced_version: list.local_version)
-        pairs.each_slice(UPDATE_BATCH_SIZE) { |batch| link_items(batch) }
+        BulkWriter.mark_items_synced(
+          pairs.map { |item, remote_item| [item.id, remote_item.external_id, remote_item.updated_at, item.local_version] },
+          link: true
+        )
       end
       @run.increment_stat(:lists_created_remote)
       @run.increment_stat(:items_created_remote, pairs.size)
@@ -83,23 +84,6 @@ module TodoSync
       Rails.logger.error("[TodoSync] list #{list.id}: could not match #{items.size} local items with #{remote.items.size} remote ones; " \
                          "the list is linked and the items will be linked by source_id next cycle")
       []
-    end
-
-    # One UPDATE ... FROM a VALUES table per batch instead of one UPDATE per item.
-    # (SQLite has no `AS v(columns)` alias for subqueries, hence the CTE.)
-    def link_items(pairs)
-      values = pairs.map do |item, remote_item|
-        remote_updated_at = remote_item.updated_at&.utc&.strftime("%Y-%m-%d %H:%M:%S.%6N")
-        ActiveRecord::Base.sanitize_sql_array(["(?, ?, ?, ?)", item.id, remote_item.external_id, remote_updated_at, item.local_version])
-      end
-
-      TodoItem.connection.execute(<<~SQL.squish)
-        WITH v(id, external_id, remote_updated_at, version) AS (VALUES #{values.join(', ')})
-        UPDATE todo_items
-        SET external_id = v.external_id, remote_updated_at = v.remote_updated_at, synced_version = v.version
-        FROM v
-        WHERE todo_items.id = v.id AND todo_items.external_id IS NULL AND todo_items.synced_version < v.version
-      SQL
     end
   end
 end
