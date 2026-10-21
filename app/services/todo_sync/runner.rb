@@ -1,7 +1,7 @@
 module TodoSync
   # Runs one sync cycle under the global lock and records it in a SyncRun.
-  # TODO: the cycle is snapshot (one GET) + link + pull + create and update pushers. Add the tombstone push and the
-  # item-creation strategy (steps 6 and 8), the deletion guard and the circuit breaker (steps 6 and 10).
+  # TODO: the cycle is snapshot (one GET) + deletion guard + link + pull + the three pushers. Add the
+  # item-creation strategy (step 8) and the circuit breaker (step 10).
   class Runner
     def self.call(trigger:, client: ExternalTodo::Client.build)
       new(trigger: trigger, client: client).call
@@ -29,12 +29,17 @@ module TodoSync
       snapshot = Snapshot.new(@client.list_todo_lists)
       run.increment_stat(:remote_calls)
 
+      deletions_allowed = DeletionGuard.allow?(snapshot)
+
       Linker.call(snapshot, run)
-      Puller.call(snapshot, run)
+      Puller.call(snapshot, run, deletions_allowed: deletions_allowed)
+      TombstonePusher.call(snapshot, run, client: @client)
       CreatePusher.call(snapshot, run, client: @client)
       UpdatePusher.call(snapshot, run, client: @client)
-      run.finish!(:succeeded)
-      Rails.logger.info("[TodoSync] run #{run.id} succeeded: #{run.stats}")
+
+      status = deletions_allowed ? :succeeded : :aborted_deletions
+      run.finish!(status)
+      Rails.logger.info("[TodoSync] run #{run.id} #{status}: #{run.stats}")
     rescue ExternalTodo::Client::Error => e
       # Without a fresh snapshot nothing else is safe to do: abort the cycle.
       Rails.logger.error("[TodoSync] run #{run.id} aborted: #{e.message}")

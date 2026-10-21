@@ -138,15 +138,26 @@ RSpec.describe TodoSync::Runner do
   end
 
   describe 'duplicates' do
-    it 'tombstones a remote list that duplicates an already linked local list' do
+    it 'tombstones a remote list that duplicates an already linked local list, and deletes it' do
       sync # creates and links the list
       duplicate = fake_api.seed_list(name: 'Local list', source_id: "rails-interview:list:#{list.id}")
 
       run = sync
 
-      expect(SyncTombstone.pluck(:record_type, :external_id)).to eq([['TodoList', duplicate['id']]])
-      expect(run.stats['duplicates_found']).to eq(1)
-      expect(list.reload.external_id).not_to eq(duplicate['id'])
+      expect(run.stats).to include('duplicates_found' => 1, 'lists_deleted_remote' => 1)
+      expect(fake_api.lists.map { |l| l['id'] }).to eq([list.reload.external_id])
+      expect(fake_api.find_list(duplicate['id'])).to be_nil
+      expect(SyncTombstone.count).to eq(0)
+    end
+
+    it 'keeps the tombstone of a duplicate whose DELETE fails' do
+      sync
+      duplicate = fake_api.seed_list(name: 'Local list', source_id: "rails-interview:list:#{list.id}")
+      fake_api.fail_next(:delete, %r{/todolists}, status: 503, times: 10)
+
+      sync
+
+      expect(SyncTombstone.pluck(:external_id)).to eq([duplicate['id']])
     end
 
     it 'is idempotent' do
@@ -155,7 +166,8 @@ RSpec.describe TodoSync::Runner do
 
       2.times { sync }
 
-      expect(SyncTombstone.count).to eq(1)
+      expect(fake_api.lists.size).to eq(1)
+      expect(SyncTombstone.count).to eq(0)
     end
   end
 

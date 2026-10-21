@@ -18,6 +18,11 @@ Rails.application.configure do
   config.x.external_todo.item_creation_strategy = ENV.fetch("EXTERNAL_TODO_ITEM_CREATION", "recreate_list")
   config.x.external_todo.recreate_max_items = 5000
 
+  # Deletion guard: refuse local deletions when more than this share of the linked
+  # lists is missing from the snapshot (only with at least guard_min_linked of them).
+  config.x.todo_sync.guard_min_linked = 5
+  config.x.todo_sync.guard_max_missing_ratio = 0.5
+
   # Off in test so existing specs never enqueue TodoSyncJob or hit the network.
   config.x.todo_sync.enabled = !Rails.env.test? && ENV["TODO_SYNC_ENABLED"] != "false"
 end

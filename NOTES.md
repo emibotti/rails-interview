@@ -8,12 +8,12 @@ Sections marked _(planned)_ describe decisions already taken whose code is not w
 
 - Two-way, **state-based** sync of `TodoList` and `TodoItem` with the External Todo API.
 - One idempotent sync cycle: snapshot (one `GET`) → link by `source_id` → apply remote changes →
-  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull, push of creates and push of updates. It is triggered by a debounced job after
+  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull, push of creates, push of updates and deletes in both directions. It is triggered by a debounced job after
   local changes and by a periodic reconciliation (rake task + cron) as a safety net.
 - Components:
   - `ExternalTodo::*` (`app/services/external_todo/`): HTTP client, mapper and value objects. The only code that knows the external wire format.
   - `Syncable` concern + `sync_*` tables: local change tracking.
-  - `TodoSync::*` (`app/services/todo_sync/`): the sync engine (`Runner`, `Snapshot`, `Linker`, `Puller`, `CreatePusher`, `UpdatePusher`, `BulkWriter` so far).
+  - `TodoSync::*` (`app/services/todo_sync/`): the sync engine (`Runner`, `Snapshot`, `Linker`, `Puller`, `CreatePusher`, `UpdatePusher`, `TombstonePusher`, `DeletionGuard`, `BulkWriter` so far).
   - `FakeExternalTodoApi` (`lib/`): in-memory fake of the external API, used by the specs and for manual runs.
 
 ## Key design decisions
@@ -156,6 +156,26 @@ Dirty linked lists and items (items only if their list is linked) are **compared
 - Not done: bounded concurrency for the `PATCH`es. It is the main lever for huge mark alls, but SQLite's single writer and the GVL make it
   a measured optimisation rather than a default, so it is listed as future work.
 
+### Deletes in both directions
+**Local → remote (`TombstonePusher`).** Each tombstone becomes a `DELETE`; `204` and `404` both mean "gone" and drop the tombstone.
+
+- Coalescing: item tombstones of a list that is also being deleted are dropped with no call (the list `DELETE` removes its items), so
+  deleting a 100k item list costs one request. A tombstone whose record is no longer in the snapshot costs no call either.
+- A failing `DELETE` keeps the tombstone, counts the attempt, stores the error and sets `next_attempt_at` with exponential backoff
+  (30 s doubling, capped at 1 h; jitter and a maximum number of attempts come with step 10). The record is **not resurrected** meanwhile:
+  the pull skips remote records that have a tombstone (`stats["skipped_tombstoned"]`), and it logs `delete wins` at `warn` when the remote
+  copy was edited after the local delete.
+
+**Remote → local (`Puller`).** The API has no tombstones, so "a linked record is not in the snapshot" is the only signal that it was deleted
+remotely. It is then deleted locally with `delete_all` (items before lists, no callbacks, hence no tombstone). If it had unsynced local changes
+the delete still wins (D5) and a `warn` says what was dropped, including the number of dirty items of a deleted list.
+
+**Deletion guard (`DeletionGuard`).** A bad response (empty, truncated) looks exactly like a mass delete, so local deletions are refused when
+the snapshot is empty but we have linked lists, or when more than 50 % of at least 5 linked lists are missing
+(`config.x.todo_sync.guard_*`). The run ends as `aborted_deletions` and an `error` is logged; pushes and imports still happen.
+Known cost: if the *only* linked list is deleted remotely it is never deleted locally (the snapshot looks empty); the same happens when
+a large share of lists is legitimately deleted at once. Both need a human (or a lower threshold). The guard looks at lists only, not at items.
+
 ### Locks with heartbeat
 `SyncState` is a single-row table with `scheduled_at` (debounce mark) and `lock_heartbeat_at`. The lock is taken with a
 conditional `UPDATE` and is considered abandoned after 5 minutes without a heartbeat, the same pattern as
@@ -204,6 +224,10 @@ Handled so far (each has a spec):
 - Mark all of N items with M already completed remotely: N - M PATCHes.
 - Edit during a PATCH: the record stays dirty and is sent next cycle.
 - PATCH answered 404: the record is deleted locally without callbacks and logged.
+- Deleting a list with items, or an item and then its list: one `DELETE`.
+- `DELETE` answered 404: counted as success. Failing `DELETE`: tombstone kept with backoff, and the pull does not bring the record back.
+- Record deleted remotely: deleted locally without a tombstone; a pending local edit is logged and dropped (delete wins).
+- Empty or mostly missing snapshot: nothing is deleted locally and the run is `aborted_deletions`.
 - Running the pull twice writes nothing; a remote change to a clean record is applied without bumping `local_version`.
 - A record dirty locally is not overwritten by a remote change, and neither is one edited while the pull was running.
 - Remote records with a blank name or no id are skipped, not imported.

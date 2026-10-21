@@ -5,35 +5,43 @@ module TodoSync
   # remote change must not bump local_version nor trigger another sync (D7).
   # Local edits are protected with a conditional UPDATE on local_version.
   #
-  # TODO: remote deletions (step 6): delete linked records missing from the snapshot, behind the DeletionGuard.
+  # Records linked locally that are missing from the snapshot were deleted remotely and are deleted
+  # here too (delete wins), but only when `deletions_allowed` (see DeletionGuard). Remote records with
+  # a pending tombstone were deleted locally and are not brought back.
   # TODO: conflict resolution (step 7): last write wins when both sides changed; delete wins over edits.
   class Puller
     BATCH_SIZE = 1000
     LIST_COLUMNS = %i[id name external_id local_version synced_version remote_updated_at].freeze
     ITEM_COLUMNS = (LIST_COLUMNS + %i[completed]).freeze
 
-    def self.call(snapshot, run)
-      new(snapshot, run).call
+    def self.call(snapshot, run, deletions_allowed: true)
+      new(snapshot, run, deletions_allowed).call
     end
 
-    def initialize(snapshot, run)
+    def initialize(snapshot, run, deletions_allowed)
       @snapshot = snapshot
       @run = run
+      @deletions_allowed = deletions_allowed
     end
 
     def call
       local_lists = TodoList.linked.select(*LIST_COLUMNS).index_by(&:external_id)
+      @tombstones = SyncTombstone.pluck(:record_type, :external_id, :remote_updated_at)
+                                 .to_h { |type, external_id, updated_at| [[type, external_id], updated_at] }
 
       @snapshot.lists.each do |remote_list|
         TodoList.transaction { pull_list(remote_list, local_lists[remote_list.external_id]) }
         # Share the GVL with Puma's request threads, like CompleteAllTodoItemsJob.
         Thread.pass
       end
+
+      delete_lists_missing_remotely(local_lists)
     end
 
     private
 
     def pull_list(remote_list, local_list)
+      return skip_tombstoned("TodoList", remote_list) if tombstoned?("TodoList", remote_list)
       return skip_invalid("list", remote_list) if remote_list.name.blank?
 
       if local_list
@@ -72,6 +80,62 @@ module TodoSync
         end
       end
       insert_items(local_list.id, new_items, check_ours: true)
+      delete_items_missing_remotely(local_items, remote_list)
+    end
+
+    def delete_lists_missing_remotely(local_lists)
+      return unless @deletions_allowed
+
+      local_lists.each_value do |local_list|
+        next if @snapshot.lists_by_external_id.key?(local_list.external_id)
+
+        dirty_items = TodoItem.where(todo_list_id: local_list.id).dirty.count
+        TodoList.transaction do
+          TodoItem.where(todo_list_id: local_list.id).delete_all
+          TodoList.where(id: local_list.id).delete_all
+        end
+        @run.increment_stat(:lists_deleted_local)
+        warn_lost_changes("list", local_list, dirty_items: dirty_items)
+      end
+    end
+
+    def delete_items_missing_remotely(local_items, remote_list)
+      return unless @deletions_allowed
+
+      remote_ids = remote_list.items.to_set(&:external_id)
+      missing = local_items.values.reject { |item| remote_ids.include?(item.external_id) }
+      return if missing.empty?
+
+      missing.each_slice(BATCH_SIZE) { |batch| TodoItem.where(id: batch.map(&:id)).delete_all }
+      @run.increment_stat(:items_deleted_local, missing.size)
+      missing.each { |item| warn_lost_changes("item", item) }
+    end
+
+    # Delete wins over a pending local edit; say what was lost.
+    def warn_lost_changes(kind, local, dirty_items: 0)
+      message = "#{kind} #{local.id} (#{local.external_id}) was deleted remotely and deleted locally"
+      lost = []
+      lost << "its own unsynced changes (v#{local.local_version})" if local.local_version > local.synced_version
+      lost << "#{dirty_items} items with unsynced local changes" if dirty_items.positive?
+      if lost.any?
+        Rails.logger.warn("[TodoSync] delete wins: #{message}, dropping #{lost.join(' and ')}")
+      else
+        Rails.logger.info("[TodoSync] #{message}")
+      end
+    end
+
+    def tombstoned?(type, remote)
+      @tombstones.key?([type, remote.external_id])
+    end
+
+    # Deleted locally but not yet deleted remotely: don't resurrect it.
+    def skip_tombstoned(type, remote)
+      deleted_at = @tombstones[[type, remote.external_id]]
+      if deleted_at && remote.updated_at && remote.updated_at > deleted_at
+        Rails.logger.warn("[TodoSync] delete wins: remote #{type} #{remote.external_id} was edited after the local delete; deleting it anyway")
+      end
+      @run.increment_stat(:skipped_tombstoned)
+      nil
     end
 
     # Compares the remote record against the local one and applies the remote
@@ -106,6 +170,7 @@ module TodoSync
     def insert_items(list_id, remote_items, check_ours:)
       now = Time.current
       rows = remote_items.filter_map do |remote_item|
+        next skip_tombstoned("TodoItem", remote_item) if tombstoned?("TodoItem", remote_item)
         next skip_invalid("item", remote_item) if remote_item.external_id.blank? || remote_item.name.blank?
         next pending_link("item", remote_item) if check_ours && ours?(remote_item)
 
