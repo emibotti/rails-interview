@@ -7,13 +7,13 @@ Sections marked _(planned)_ describe decisions already taken whose code is not w
 ## High-level overview
 
 - Two-way, **state-based** sync of `TodoList` and `TodoItem` with the External Todo API.
-- One idempotent sync cycle _(planned)_: snapshot (one `GET`) → link by `source_id` → apply remote changes →
-  push tombstones → push creates → item-creation strategy → push updates. It is triggered by a debounced job after
+- One idempotent sync cycle: snapshot (one `GET`) → link by `source_id` → apply remote changes →
+  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot + pull. It is triggered by a debounced job after
   local changes and by a periodic reconciliation (rake task + cron) as a safety net.
 - Components:
   - `ExternalTodo::*` (`app/services/external_todo/`): HTTP client, mapper and value objects. The only code that knows the external wire format.
   - `Syncable` concern + `sync_*` tables: local change tracking.
-  - `TodoSync::*` _(planned)_: the sync engine.
+  - `TodoSync::*` (`app/services/todo_sync/`): the sync engine (`Runner`, `Snapshot`, `Puller` so far).
   - `FakeExternalTodoApi` (`lib/`): in-memory fake of the external API, used by the specs and for manual runs.
 
 ## Key design decisions
@@ -83,6 +83,31 @@ Because a Puma restart loses `:async` jobs, the sync state (what is dirty, which
 mark and the lock) lives in SQLite. The job is only a trigger, so losing one loses nothing.
 Sidekiq is listed in future work.
 
+### Pull: remote → local (`TodoSync::Puller`)
+The cycle starts with one `GET /todolists` and only then writes anything. The pull then:
+
+- **Imports** remote lists/items that are unknown locally, in one short transaction per list, items in batches of 1000
+  with `insert_all`. They are born in sync (`local_version = synced_version = 1`, remote `created_at`/`updated_at` kept),
+  so they are not dirty and never bounce back to the remote.
+- **Detects remote changes** by comparing the snapshot's `updated_at` with the stored `remote_updated_at` (to the millisecond,
+  the precision of the wire format), not by comparing every field. A record whose timestamp did not move costs no write at all,
+  so running the pull twice writes nothing (a spec counts the `INSERT`/`UPDATE` statements).
+- **Applies** a remote change only if the record is clean locally. It uses a conditional `UPDATE ... WHERE local_version = <the one read>`:
+  if the user edited the record between our read and our write, zero rows match and the next cycle re-evaluates. No lock is held.
+- **Never overwrites a dirty record.** If both sides changed and the values differ, it is counted in `stats["conflicts"]`, logged,
+  and `remote_updated_at` is left as it was so the conflict stays detectable. Resolving it is step 7.
+- **Skips records created by us** (parseable `source_id`) that are not linked yet: the linker (step 4) binds them to their local record,
+  which is how a `POST` that timed out gets recognised without creating duplicates.
+- **Skips remote records with a blank name or no id**, with a `warn` and `stats["skipped_invalid"]`. `insert_all` bypasses validations and
+  `name` is required locally; importing a placeholder would invent data, so skipping is the conservative choice.
+- Calls `Thread.pass` between lists, like the mark all job, because SQLite runs in-process and would otherwise starve Puma's request threads.
+
+Remote deletions are not handled yet (step 6).
+
+`Runner` takes the global lock, wraps the cycle in a `SyncRun` (status, stats, error) and tags the logs with `todo_sync` and `run=<id>`.
+If the snapshot cannot be fetched the run is `aborted` and nothing is written: pushing without a fresh snapshot risks duplicates and overwrites.
+The lock is always released, including on unexpected errors (the run is then `failed` and the error re-raised).
+
 ### Locks with heartbeat
 `SyncState` is a single-row table with `scheduled_at` (debounce mark) and `lock_heartbeat_at`. The lock is taken with a
 conditional `UPDATE` and is considered abandoned after 5 minutes without a heartbeat, the same pattern as
@@ -123,6 +148,9 @@ Handled so far (each has a spec):
 - Registering the same tombstone twice does not fail (unique index + `find_or_create_by!`).
 - Editing a record without changing a synced field does not make it dirty.
 - Mark all marks exactly the items it completes as dirty, and none of the others.
+- Running the pull twice writes nothing; a remote change to a clean record is applied without bumping `local_version`.
+- A record dirty locally is not overwritten by a remote change, and neither is one edited while the pull was running.
+- Remote records with a blank name or no id are skipped, not imported.
 - A POST that was processed but timed out is visible to the client as `TimeoutError` and is not retried.
 
 ## Assumptions
@@ -166,6 +194,8 @@ bin/fake_external_api                    # http://localhost:4000, state in memor
 FAKE_SUPPORTS_ITEM_CREATION=true bin/fake_external_api   # also serves the proposed POST /todolists/:id/todoitems
 EXTERNAL_TODO_API_URL=http://localhost:4000 bin/puma
 ```
+
+Pull the remote state into the local database once: `bin/rails todo_sync:pull` (prints the run summary).
 
 Tests: `bin/rspec` (the external API is faked in-process with WebMock; the sync is disabled in the test environment
 unless a spec enables it).

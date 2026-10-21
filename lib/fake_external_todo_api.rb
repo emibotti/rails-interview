@@ -162,7 +162,7 @@ class FakeExternalTodoApi
     list
   end
 
-  def build_item(description:, completed:, source_id:)
+  def build_item(description: nil, completed: false, source_id: nil)
     timestamp = now
     {
       "id" => SecureRandom.uuid, "source_id" => source_id, "description" => description,
