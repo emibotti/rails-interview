@@ -1,0 +1,12 @@
+#!/usr/bin/env ruby
+# Runs the in-memory fake of the External Todo API on http://localhost:4000
+# (override with PORT). Usage: EXTERNAL_TODO_API_URL=http://localhost:4000 bin/puma
+ENV["BUNDLE_GEMFILE"] ||= File.expand_path("../Gemfile", __dir__)
+require "bundler/setup"
+require "rack"
+require "rack/handler/puma"
+require "net/http"
+require_relative "../lib/fake_external_todo_api"
+
+app = FakeExternalTodoApi.new(supports_item_creation: ENV["FAKE_SUPPORTS_ITEM_CREATION"] == "true")
+Rack::Handler::Puma.run(app, Host: "0.0.0.0", Port: Integer(ENV.fetch("PORT", 4000)))
