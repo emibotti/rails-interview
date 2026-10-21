@@ -25,6 +25,14 @@ gem "stimulus-rails"
 # Build JSON APIs with ease [https://github.com/rails/jbuilder]
 gem "jbuilder"
 
+# Faraday depends on json; json >= 2.10 dropped the `quirks_mode` option that
+# Rails 7.0 (ActiveSupport JSON encoding) and Jbuilder 2.11 still pass.
+gem "json", "~> 2.9.1"
+
+# HTTP client for the External Todo API
+gem "faraday", "~> 2.12"
+gem "faraday-retry", "~> 2.2"
+
 # Use Redis adapter to run Action Cable in production
 # gem "redis", "~> 4.0"
 
@@ -65,6 +73,9 @@ group :development do
 end
 
 group :test do
+  # Stub HTTP requests to the External Todo API
+  gem "webmock", "~> 3.24"
+
   # Use system testing [https://guides.rubyonrails.org/testing.html#system-testing]
   gem "rspec"
   gem "capybara"
