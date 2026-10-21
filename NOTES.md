@@ -8,12 +8,12 @@ Sections marked _(planned)_ describe decisions already taken whose code is not w
 
 - Two-way, **state-based** sync of `TodoList` and `TodoItem` with the External Todo API.
 - One idempotent sync cycle: snapshot (one `GET`) → link by `source_id` → apply remote changes →
-  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot + pull. It is triggered by a debounced job after
+  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull and push of creates. It is triggered by a debounced job after
   local changes and by a periodic reconciliation (rake task + cron) as a safety net.
 - Components:
   - `ExternalTodo::*` (`app/services/external_todo/`): HTTP client, mapper and value objects. The only code that knows the external wire format.
   - `Syncable` concern + `sync_*` tables: local change tracking.
-  - `TodoSync::*` (`app/services/todo_sync/`): the sync engine (`Runner`, `Snapshot`, `Puller` so far).
+  - `TodoSync::*` (`app/services/todo_sync/`): the sync engine (`Runner`, `Snapshot`, `Linker`, `Puller`, `CreatePusher` so far).
   - `FakeExternalTodoApi` (`lib/`): in-memory fake of the external API, used by the specs and for manual runs.
 
 ## Key design decisions
@@ -108,6 +108,36 @@ Remote deletions are not handled yet (step 6).
 If the snapshot cannot be fetched the run is `aborted` and nothing is written: pushing without a fresh snapshot risks duplicates and overwrites.
 The lock is always released, including on unexpected errors (the run is then `failed` and the error re-raised).
 
+### Linking by `source_id` and idempotent creates (`TodoSync::Linker`)
+The API has no `Idempotency-Key`, so a `POST` that times out is ambiguous: the list may exist remotely. We never re-POST.
+Instead the snapshot is fetched first, and any remote list/item whose `source_id` is ours is **linked** to its local record
+(only `external_id` and `remote_updated_at` are stored, `synced_version` is not touched; the update pusher marks it synced if
+the values already match). The result is a single remote list however many cycles it takes.
+
+- Linking updates are conditional (`WHERE external_id IS NULL`, and `todo_list_id = <that list>` for items), so they are idempotent and
+  never re-bind a record.
+- **Duplicates:** if two remote lists carry the source_id of the same local list and the one the local record points to is
+  still in the snapshot, the other one is ours and a duplicate (an ambiguous POST that was retried by a human, or a list recreated by
+  the item-creation strategy). It gets a tombstone, so it is deleted through the normal path. Only records with our prefix are ever
+  deleted automatically.
+- **Orphans:** a remote record with our `source_id` but no local row (most likely deleted locally before it was ever synced) is left
+  alone and logged (`stats["orphans"]`). The prefix cannot distinguish it from a record written by another environment that shares the
+  same remote, and deleting someone else's data is worse than leaving a stray record. Local ids are never reused (SQLite
+  `AUTOINCREMENT`), so a stray cannot be linked to the wrong record.
+
+### Pushing creates (`TodoSync::CreatePusher`)
+Each local list without `external_id` is sent with **all** its items in one `POST` (the only way the API creates items).
+
+- The returned ids are matched to local rows by `source_id`. If the API does not echo `source_id`, it falls back to the order the items
+  were sent in (with a `warn`), and if that is impossible the list is linked and the items are linked by the Linker next cycle.
+- Everything is saved in one transaction with `synced_version = <version sent>`, never the current one: an edit made while the POST
+  was in flight leaves the record dirty, and items created during the POST stay unlinked for the item-creation strategy (step 8).
+- Item links are written with one `UPDATE ... FROM (VALUES ...)` per 500 items instead of one `UPDATE` per item, which matters for
+  lists with 100k items (a CTE is needed because SQLite has no `AS v(columns)` alias for subqueries).
+- A `TimeoutError` is counted and the list is left for the next cycle (to be linked if it was created). A `4xx` or `5xx` is counted as a
+  failure and the cycle continues with the next list. Backoff and dead letters come in step 10.
+- Trade-off: a list with a huge number of items is one huge request. The plan caps the lists we *recreate* (D9), not the first upload.
+
 ### Locks with heartbeat
 `SyncState` is a single-row table with `scheduled_at` (debounce mark) and `lock_heartbeat_at`. The lock is taken with a
 conditional `UPDATE` and is considered abandoned after 5 minutes without a heartbeat, the same pattern as
@@ -148,6 +178,10 @@ Handled so far (each has a spec):
 - Registering the same tombstone twice does not fail (unique index + `find_or_create_by!`).
 - Editing a record without changing a synced field does not make it dirty.
 - Mark all marks exactly the items it completes as dirty, and none of the others.
+- Ambiguous POST (created remotely, client saw a timeout): the next cycle links it, with no second POST and no duplicate.
+- Edit made while a POST was in flight: the record stays dirty. Items created meanwhile stay unlinked.
+- Duplicate remote list with our `source_id`: tombstoned. Remote record with our `source_id` and no local row: left alone and logged.
+- A failing POST (422/500) does not stop the other lists.
 - Running the pull twice writes nothing; a remote change to a clean record is applied without bumping `local_version`.
 - A record dirty locally is not overwritten by a remote change, and neither is one edited while the pull was running.
 - Remote records with a blank name or no id are skipped, not imported.
@@ -195,7 +229,7 @@ FAKE_SUPPORTS_ITEM_CREATION=true bin/fake_external_api   # also serves the propo
 EXTERNAL_TODO_API_URL=http://localhost:4000 bin/puma
 ```
 
-Pull the remote state into the local database once: `bin/rails todo_sync:pull` (prints the run summary).
+Run one sync cycle (link, pull, push creates): `bin/rails todo_sync:run` (prints the run summary).
 
 Tests: `bin/rspec` (the external API is faked in-process with WebMock; the sync is disabled in the test environment
 unless a spec enables it).

@@ -1,7 +1,7 @@
 module TodoSync
   # Runs one sync cycle under the global lock and records it in a SyncRun.
-  # TODO: the cycle is only snapshot (one GET) + pull. Add link, tombstone/create/update pushes and the
-  # item-creation strategy (steps 4 to 8), the deletion guard and the circuit breaker (steps 6 and 10).
+  # TODO: the cycle is snapshot (one GET) + link + pull + create pusher. Add the tombstone and update pushes and the
+  # item-creation strategy (steps 5 to 8), the deletion guard and the circuit breaker (steps 6 and 10).
   class Runner
     def self.call(trigger:, client: ExternalTodo::Client.build)
       new(trigger: trigger, client: client).call
@@ -29,7 +29,9 @@ module TodoSync
       snapshot = Snapshot.new(@client.list_todo_lists)
       run.increment_stat(:remote_calls)
 
+      Linker.call(snapshot, run)
       Puller.call(snapshot, run)
+      CreatePusher.call(snapshot, run, client: @client)
       run.finish!(:succeeded)
       Rails.logger.info("[TodoSync] run #{run.id} succeeded: #{run.stats}")
     rescue ExternalTodo::Client::Error => e

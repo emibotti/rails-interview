@@ -40,7 +40,6 @@ module TodoSync
         pull_known_list(remote_list, local_list)
       elsif ours?(remote_list)
         # Created by us (e.g. a POST that timed out): the Linker binds it to its local record.
-        # TODO: the Linker doesn't exist yet (step 4); until then these records are not imported.
         pending_link("list", remote_list)
       else
         create_list(remote_list)

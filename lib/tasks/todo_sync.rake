@@ -1,7 +1,7 @@
 namespace :todo_sync do
-  desc 'Pull the external API state into the local database (remote -> local)'
-  task pull: :environment do
-    run = TodoSync::Runner.call(trigger: :rake_pull)
+  desc 'Run one sync cycle with the external API and print the summary'
+  task run: :environment do
+    run = TodoSync::Runner.call(trigger: :rake)
 
     if run == :busy
       puts 'Another sync is running'
