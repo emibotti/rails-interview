@@ -220,6 +220,12 @@ describe Api::TodoItemsController do
   end
 
   describe 'PATCH update' do
+    it 'bumps local_version of the item' do
+      expect {
+        patch :update, params: { todo_list_id: todo_list.id, id: todo_item.id, name: 'Changed' }, format: :json
+      }.to change { todo_item.reload.local_version }.by(1)
+    end
+
     let(:base) { { todo_list_id: todo_list.id, id: todo_item.id } }
 
     it 'updates the name' do

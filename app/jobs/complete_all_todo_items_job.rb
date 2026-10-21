@@ -24,7 +24,11 @@ class CompleteAllTodoItemsJob < ApplicationJob
     broadcast_status(todo_list, state: :running, processed: processed, total: total)
 
     scope.in_batches(of: BATCH_SIZE) do |batch|
-      processed += batch.update_all(completed: true, updated_at: Time.current)
+      # update_all skips callbacks, so bump local_version by hand to mark the
+      # items dirty for the sync.
+      processed += batch.update_all(
+        ['completed = ?, updated_at = ?, local_version = local_version + 1', true, Time.current]
+      )
       todo_list.mark_all_heartbeat!
       broadcast_status(todo_list, state: :running, processed: processed, total: total)
 
