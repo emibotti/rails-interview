@@ -1,7 +1,6 @@
 module TodoSync
   # Runs one sync cycle under the global lock and records it in a SyncRun.
-  # TODO: the cycle is snapshot (one GET) + deletion guard + link + pull + the three pushers. Add the
-  # item-creation strategy (step 8) and the circuit breaker (step 10).
+  # TODO: add the circuit breaker (step 10) and the entry points (job, scheduler, rake tasks: step 9).
   class Runner
     def self.call(trigger:, client: ExternalTodo::Client.build)
       new(trigger: trigger, client: client).call
@@ -35,6 +34,9 @@ module TodoSync
       Puller.call(snapshot, run, deletions_allowed: deletions_allowed)
       TombstonePusher.call(snapshot, run, client: @client)
       CreatePusher.call(snapshot, run, client: @client)
+      ItemCreation.call(snapshot, run, client: @client)
+      # A recreated list leaves a tombstone for the old one: send that DELETE in this same cycle.
+      TombstonePusher.call(snapshot, run, client: @client) if run.stats["lists_recreated_remote"]
       UpdatePusher.call(snapshot, run, client: @client)
 
       status = deletions_allowed ? :succeeded : :aborted_deletions

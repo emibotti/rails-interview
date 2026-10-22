@@ -19,12 +19,14 @@ module TodoSync
     end
 
     def call
-      @snapshot.lists_by_source_id.each do |local_id, remote_list|
+      @snapshot.lists_by_source_id.each do |local_id, remote_lists|
         local_list = TodoList.select(:id, :external_id).find_by(id: local_id)
-        next orphan("list", remote_list) unless local_list
+        next remote_lists.each { |remote_list| orphan("list", remote_list) } unless local_list
 
-        link_list(local_list, remote_list)
-        link_items(local_list, remote_list) if linked_to?(local_list, remote_list)
+        remote_lists.each do |remote_list|
+          link_list(local_list, remote_list)
+          link_items(local_list, remote_list) if linked_to?(local_list, remote_list)
+        end
       end
     end
 
@@ -44,6 +46,8 @@ module TodoSync
     # we created (an ambiguous POST, or a list recreated by the item creation
     # strategy) and gets deleted through a tombstone.
     def duplicate(local_list, remote_list)
+      return relink_to_recreated(local_list, remote_list) if recreated?(local_list, remote_list)
+
       unless @snapshot.lists_by_external_id.key?(local_list.external_id)
         Rails.logger.warn("[TodoSync] remote list #{remote_list.external_id} has the source_id of local list " \
                           "#{local_list.id}, which points to #{local_list.external_id} (not in the snapshot); leaving it alone")
@@ -56,6 +60,40 @@ module TodoSync
       @run.increment_stat(:duplicates_found)
       Rails.logger.warn("[TodoSync] remote list #{remote_list.external_id} duplicates local list #{local_list.id} " \
                         "(linked to #{local_list.external_id}); scheduled for deletion")
+    end
+
+    # The item creation strategy `recreate_list` POSTs a new list with all the items. If that POST timed out,
+    # the new list exists remotely but the local list still points to the old one. The new one is recognisable
+    # because it contains local items that are not linked yet (the reason for recreating in the first place).
+    def recreated?(local_list, remote_list)
+      unlinked_ids = TodoItem.where(todo_list_id: local_list.id, external_id: nil).pluck(:id).to_set
+      remote_list.items.any? { |item| unlinked_ids.include?(ExternalTodo::SourceId.parse(item.source_id)&.last) }
+    end
+
+    # Adopts the recreated list and schedules the old one for deletion.
+    # Versions are not touched: the UpdatePusher diffs against the snapshot and sends what differs.
+    def relink_to_recreated(local_list, remote_list)
+      old_external_id = local_list.external_id
+      TodoList.transaction do
+        old = @snapshot.lists_by_external_id[old_external_id]
+        SyncTombstone.find_or_create_by!(record_type: "TodoList", external_id: old_external_id) do |tombstone|
+          tombstone.remote_updated_at = old&.updated_at
+        end
+        TodoList.where(id: local_list.id).update_all(external_id: remote_list.external_id, remote_updated_at: remote_list.updated_at)
+
+        own_item_ids = TodoItem.where(todo_list_id: local_list.id).pluck(:id).to_set
+        rows = remote_list.items.filter_map do |remote_item|
+          kind, item_id = ExternalTodo::SourceId.parse(remote_item.source_id)
+          next unless kind == :item && own_item_ids.include?(item_id) && remote_item.external_id.present?
+
+          [item_id, remote_item.external_id, remote_item.updated_at, 0]
+        end
+        BulkWriter.mark_items_synced(rows, mode: :retarget)
+      end
+      local_list.external_id = remote_list.external_id
+      @run.increment_stat(:lists_relinked)
+      Rails.logger.warn("[TodoSync] local list #{local_list.id} adopted the recreated remote list #{remote_list.external_id}; " \
+                        "#{old_external_id} scheduled for deletion")
     end
 
     def linked_to?(local_list, remote_list)

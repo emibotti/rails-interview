@@ -75,15 +75,19 @@ RSpec.describe TodoSync::Runner do
       expect(items.last.reload.dirty_for_sync?).to be(false)
     end
 
-    it 'leaves items created during the POST unlinked' do
-      late_item = nil
-      allow(external_client).to receive(:create_todo_list).and_wrap_original do |original, **args|
-        original.call(**args).tap { late_item = list.todo_items.create!(name: 'late') }
+    context 'with the skip item creation strategy' do
+      item_creation_strategy 'skip'
+
+      it 'leaves items created during the POST unlinked' do
+        late_item = nil
+        allow(external_client).to receive(:create_todo_list).and_wrap_original do |original, **args|
+          original.call(**args).tap { late_item = list.todo_items.create!(name: 'late') }
+        end
+
+        sync
+
+        expect(late_item.reload).to have_attributes(external_id: nil, synced_version: 0)
       end
-
-      sync
-
-      expect(late_item.reload).to have_attributes(external_id: nil, synced_version: 0)
     end
 
     it 'links the items in batches' do

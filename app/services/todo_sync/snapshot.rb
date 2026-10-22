@@ -22,7 +22,8 @@ module TodoSync
       @items_by_external_id ||= lists.flat_map(&:items).select(&:external_id).index_by(&:external_id)
     end
 
-    # Only records created by us have a parseable source_id: { 5 => remote_list }.
+    # Only records created by us have a parseable source_id: { 5 => [remote_list, ...] }.
+    # It is a list because duplicates (an ambiguous POST, a recreated list) share the source_id.
     def lists_by_source_id
       @lists_by_source_id ||= index_by_source(lists, :list)
     end
@@ -34,10 +35,10 @@ module TodoSync
     private
 
     def index_by_source(records, kind)
-      records.each_with_object({}) do |record, index|
+      records.each_with_object(Hash.new { |hash, key| hash[key] = [] }) do |record, index|
         parsed_kind, id = ExternalTodo::SourceId.parse(record.source_id)
-        index[id] = record if parsed_kind == kind
-      end
+        index[id] << record if parsed_kind == kind
+      end.to_h
     end
   end
 end

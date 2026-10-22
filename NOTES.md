@@ -8,12 +8,12 @@ Sections marked _(planned)_ describe decisions already taken whose code is not w
 
 - Two-way, **state-based** sync of `TodoList` and `TodoItem` with the External Todo API.
 - One idempotent sync cycle: snapshot (one `GET`) → link by `source_id` → apply remote changes →
-  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull, push of creates, push of updates, deletes in both directions and conflict resolution. It is triggered by a debounced job after
+  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull, push of creates, push of updates, deletes in both directions, conflict resolution and item creation in existing lists. It is triggered by a debounced job after
   local changes and by a periodic reconciliation (rake task + cron) as a safety net.
 - Components:
   - `ExternalTodo::*` (`app/services/external_todo/`): HTTP client, mapper and value objects. The only code that knows the external wire format.
   - `Syncable` concern + `sync_*` tables: local change tracking.
-  - `TodoSync::*` (`app/services/todo_sync/`): the sync engine (`Runner`, `Snapshot`, `Linker`, `Puller`, `CreatePusher`, `UpdatePusher`, `TombstonePusher`, `DeletionGuard`, `BulkWriter` so far).
+  - `TodoSync::*` (`app/services/todo_sync/`): the sync engine (`Runner`, `Snapshot`, `Linker`, `Puller`, `CreatePusher`, `UpdatePusher`, `TombstonePusher`, `ItemCreation::*`, `DeletionGuard`, `BulkWriter` so far).
   - `FakeExternalTodoApi` (`lib/`): in-memory fake of the external API, used by the specs and for manual runs.
 
 ## Key design decisions
@@ -192,6 +192,27 @@ A conflict exists only when **both sides changed** since the last sync (`local_v
 - Risk: the two clocks are not the same clock. A remote server running behind ours loses every conflict. Nothing in the API (no ETag or version)
   allows a safer rule.
 
+### Items created in a list that already exists remotely (`TodoSync::ItemCreation`)
+The API creates items only inside `POST /todolists`; there is no endpoint to add one to an existing list. This is the biggest gap of the API
+for a two-way sync, so how it is bridged is a **strategy chosen by configuration** (`EXTERNAL_TODO_ITEM_CREATION`), documented as temporary and
+easy to retire when the API gets the endpoint (a one-line config change, no code):
+
+- **`recreate_list` (default, temporary).** After the pull, a list with new items is recreated: one `POST` of a new list with *all* its items
+  (same `source_id`), then in one transaction the list and every item are pointed to the new remote ids and a tombstone is left for the old list,
+  whose `DELETE` goes out in the same cycle through the normal tombstone path. Two calls per list, however many items were added.
+  - Create first, delete after: a failure leaves a duplicate (recoverable) instead of lost data. If the `POST` times out, the next snapshot has
+    two remote lists with our `source_id`; the Linker adopts the one that contains the new, still unlinked items and tombstones the other
+    (a plain duplicate, with nothing new inside, keeps the opposite rule: the one the local list points to stays).
+  - Risks, accepted for a temporary measure: remote ids change (the `source_id` is stable), the remote `created_at` is lost, an item that someone
+    else adds remotely between our `GET` and the `DELETE` is lost, and a huge list means a huge `POST`. The last one is capped by
+    `recreate_max_items` (5000): above it the list falls back to `skip` with a clear error.
+- **`skip`.** No remote call. The new items stay unlinked and dirty with `sync_error = "unsupported_by_remote: ..."`, counted in the run stats.
+  Safe, but those items never reach the remote. Rows that already carry the error are not rewritten on later cycles.
+- **`api_endpoint` (the target).** One `POST /todolists/{id}/todoitems` per item with `client.create_todo_item`. The fake supports it behind
+  `supports_item_creation`. A timeout is handled like for lists: the Linker binds the item by `source_id` next cycle.
+
+All three share the same shape (`call(snapshot, run, client:)`) and handle the unlinked items of linked lists, grouped by list.
+
 ### Locks with heartbeat
 `SyncState` is a single-row table with `scheduled_at` (debounce mark) and `lock_heartbeat_at`. The lock is taken with a
 conditional `UPDATE` and is considered abandoned after 5 minutes without a heartbeat, the same pattern as
@@ -245,6 +266,9 @@ Handled so far (each has a spec):
 - Record deleted remotely: deleted locally without a tombstone; a pending local edit is logged and dropped (delete wins).
 - Empty or mostly missing snapshot: nothing is deleted locally and the run is `aborted_deletions`.
 - Both sides changed: the newest wins, a tie goes to the remote, equal values are not a conflict, and the result is stable on the next cycle.
+- New items in a synced list: 1 POST + 1 DELETE per list with `recreate_list`; a failed DELETE leaves a recoverable duplicate; a POST that timed out is
+  adopted next cycle without duplicates; lists above `recreate_max_items` fall back to `skip`.
+- Two remote lists sharing a `source_id` are told apart by content (the one holding the unlinked items is the recreated one).
 - Running the pull twice writes nothing; a remote change to a clean record is applied without bumping `local_version`.
 - A record dirty locally is not overwritten by a remote change, and neither is one edited while the pull was running.
 - Remote records with a blank name or no id are skipped, not imported.
@@ -289,6 +313,7 @@ The fake external API:
 ```bash
 bin/fake_external_api                    # http://localhost:4000, state in memory
 FAKE_SUPPORTS_ITEM_CREATION=true bin/fake_external_api   # also serves the proposed POST /todolists/:id/todoitems
+EXTERNAL_TODO_ITEM_CREATION=recreate_list|skip|api_endpoint bin/puma   # how new items in synced lists reach the API
 EXTERNAL_TODO_API_URL=http://localhost:4000 bin/puma
 ```
 

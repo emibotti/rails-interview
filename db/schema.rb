@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[7.0].define(version: 2026_10_21_230003) do
+ActiveRecord::Schema[7.0].define(version: 2026_10_22_120001) do
   create_table "sync_runs", force: :cascade do |t|
     t.string "trigger"
     t.string "status", default: "running", null: false
@@ -53,6 +53,9 @@ ActiveRecord::Schema[7.0].define(version: 2026_10_21_230003) do
     t.integer "local_version", default: 1, null: false
     t.integer "synced_version", default: 0, null: false
     t.datetime "remote_updated_at"
+    t.integer "sync_attempts", default: 0, null: false
+    t.datetime "next_sync_at"
+    t.text "sync_error"
     t.index ["external_id"], name: "index_todo_items_on_external_id", unique: true
     t.index ["id"], name: "index_todo_items_on_dirty", where: "local_version > synced_version"
     t.index ["todo_list_id", "completed"], name: "index_todo_items_on_todo_list_id_and_completed"
@@ -68,6 +71,9 @@ ActiveRecord::Schema[7.0].define(version: 2026_10_21_230003) do
     t.integer "local_version", default: 1, null: false
     t.integer "synced_version", default: 0, null: false
     t.datetime "remote_updated_at"
+    t.integer "sync_attempts", default: 0, null: false
+    t.datetime "next_sync_at"
+    t.text "sync_error"
     t.index ["external_id"], name: "index_todo_lists_on_external_id", unique: true
     t.index ["id"], name: "index_todo_lists_on_dirty", where: "local_version > synced_version"
   end

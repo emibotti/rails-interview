@@ -60,7 +60,7 @@ module TodoSync
                 .update_all(external_id: remote.external_id, remote_updated_at: remote.updated_at, synced_version: list.local_version)
         BulkWriter.mark_items_synced(
           pairs.map { |item, remote_item| [item.id, remote_item.external_id, remote_item.updated_at, item.local_version] },
-          link: true
+          mode: :link
         )
       end
       @run.increment_stat(:lists_created_remote)

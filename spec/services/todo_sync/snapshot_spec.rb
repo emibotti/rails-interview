@@ -23,8 +23,14 @@ RSpec.describe TodoSync::Snapshot do
     expect(snapshot.items_by_external_id.keys).to match_array(%w[i1 i2])
   end
 
+  it 'keeps every record that shares a source_id' do
+    duplicate = remote_list(external_id: 'l2', source_id: 'rails-interview:list:5')
+
+    expect(described_class.new([ours_list, duplicate]).lists_by_source_id).to eq(5 => [ours_list, duplicate])
+  end
+
   it 'indexes by parsed source_id, only for our records' do
-    expect(snapshot.lists_by_source_id).to eq(5 => ours_list)
-    expect(snapshot.items_by_source_id).to eq(3 => ours_item)
+    expect(snapshot.lists_by_source_id).to eq(5 => [ours_list])
+    expect(snapshot.items_by_source_id).to eq(3 => [ours_item])
   end
 end
