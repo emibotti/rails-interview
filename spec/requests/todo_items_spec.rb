@@ -18,6 +18,11 @@ describe 'Todo items checkbox', type: :request do
       expect(todo_item.reload.completed).to eq(true)
     end
 
+    it 'bumps local_version only when the value changes' do
+      expect { toggle(true) }.to change { todo_item.reload.local_version }.by(1)
+      expect { toggle(true) }.not_to(change { todo_item.reload.local_version })
+    end
+
     it 'unmarks a completed item' do
       todo_item.update!(completed: true)
 

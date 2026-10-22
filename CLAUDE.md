@@ -13,6 +13,7 @@ A small Todo List API in Rails 7.0 (Ruby 3.1, SQLite), used as a starting point 
 - Run all tests: `bin/rspec`
 - Run one file / one example: `bin/rspec spec/controllers/api/todo_lists_controller_spec.rb` or `bin/rspec spec/controllers/api/todo_lists_controller_spec.rb:20`
 - Migrations: `bin/rails db:migrate` (updates `db/schema.rb`); test schema is kept in sync automatically via `maintain_test_schema!`.
+- Sync with the External Todo API: `bin/fake_external_api` (fake server on :4000), `bin/rails todo_sync:run` (one cycle), `todo_sync:status`, `todo_sync:failed`, `todo_sync:retry_failed`.
 - Bulk test data: `bin/rails "dev:seed_items[LIST_ID,COUNT]"` inserts COUNT pending items with `insert_all` (creates a new list if LIST_ID is blank). Use 100k+ items to see the mark all progress bar move.
 
 There is no linter configured.
@@ -41,15 +42,16 @@ Tests use RSpec with transactional fixtures: controller specs for the API (`rend
 
 ### Models
 
-- `TodoList` `has_many :todo_items, dependent: :destroy` and validates `name` presence.
+- `TodoList` `has_many :todo_items, dependent: :delete_all` (one SQL `DELETE`, no per-item callbacks; its tombstone covers its items) and validates `name` presence.
 - `TodoItem` `belongs_to :todo_list`, validates `name` presence; `completed` is `null: false, default: false`.
+- Both include `Syncable` (see Sync below).
 
 ### Mark all (Hotwire + Action Cable)
 
 `POST /todolists/:id/complete_all` marks every pending item of a list as completed without touching items in the request:
 
 - It takes a per-list lock (`todo_lists.mark_all_heartbeat_at`, acquired with a conditional `UPDATE`), and enqueues a single `CompleteAllTodoItemsJob` with the current max pending item id, so items created later are not affected. It responds 202, 409 if a run is already in progress, or 200 if nothing is pending.
-- The job updates in batches of 1000 (`in_batches` + `update_all`, setting `updated_at` by hand, filtered by `completed: false` so it is idempotent), refreshing the heartbeat and broadcasting a progress status via Turbo Streams after each batch, then a final `done` status. A lock with a heartbeat older than `TodoList::MARK_ALL_STALE_AFTER` is considered abandoned.
+- The job updates in batches of 1000 (`in_batches` + `update_all`, setting `updated_at` and bumping `local_version` by hand since callbacks don't run, filtered by `completed: false` so it is idempotent), refreshing the heartbeat and broadcasting a progress status via Turbo Streams after each batch, then a final `done` status. A lock with a heartbeat older than `TodoList::MARK_ALL_STALE_AFTER` is considered abandoned.
 - The 202/409 responses are empty turbo streams on purpose: the status element is only replaced by job broadcasts, so a late HTTP response can't overwrite `done`.
 - `mark_all_controller.js` keeps the button disabled while running (re-applying it on `turbo:submit-end`, since Turbo re-enables the submitter) and reloads the items frame at the current URL on `done` (pagination links use `data-turbo-action="advance"`).
 
@@ -59,6 +61,24 @@ No queue backend or Redis: in development, jobs run on the default `:async` adap
 
 - `config/initializers/sqlite3.rb` backports Rails 8.0's SQLite setup: WAL plus a busy handler that sleeps in Ruby (Rails 8.0 uses sqlite3 2.x `busy_handler_timeout`). The sqlite3 1.x `busy_timeout` holds the GVL while waiting, which deadlocks a job and a request until the timeout expires; Rails 7.1/7.2 still use it, so the initializer can only be removed when upgrading to Rails 8.0.
 - The job calls `Thread.pass` after each batch; without it, SQLite holding the GVL starves concurrent requests until the job ends.
+
+### Sync with the External Todo API
+
+Two-way, state-based sync of lists and items with an external REST API. Design, trade-offs and assumptions are in `NOTES.md`; read it before changing anything here.
+
+- **Change tracking** (`Syncable`, columns on `todo_lists`/`todo_items`): `external_id`, `local_version` (bumped by `before_update` when `name`/`completed` change), `synced_version`, `remote_updated_at`, `sync_attempts`, `next_sync_at`, `sync_error`. Dirty = `local_version > synced_version`. Deleting a synced record leaves a `SyncTombstone` (hard delete, no soft delete). `sync_runs` (one row per cycle, with stats) and `sync_states` (single row: debounce mark + global lock with heartbeat).
+- **Code**: `app/services/external_todo/` (Faraday client, mapper, `RemoteList`/`RemoteItem` structs, `SourceId`; the only code that knows the wire format: items use `description` there) and `app/services/todo_sync/` (`Runner` runs one cycle: `Snapshot` → `DeletionGuard` → `Linker` → `Puller` → `TombstonePusher` → `CreatePusher` → `ItemCreation::*` → `UpdatePusher`; plus `Scheduler`, `Backoff`, `Failures`, `GuardedClient` circuit breaker, `DeadLetters`, `BulkWriter`), `TodoSyncJob`, `lib/tasks/todo_sync.rake`, `lib/fake_external_todo_api.rb` and `bin/fake_external_api`. Config is in `config/initializers/external_todo.rb`.
+- **Rules that keep it correct**:
+  - The sync writes with `insert_all`/`update_all`/`update_columns`/`delete_all` only, so no callback runs: no `local_version` bump, no tombstone, no new sync (no echo). Do not use `save`/`destroy` in `TodoSync::*`.
+  - Any new *bulk local* write that skips callbacks must bump `local_version` itself and call `TodoSync::Scheduler.request!(reason:)` once at the end (see `CompleteAllTodoItemsJob`, `dev:seed_items`).
+  - `synced_version` is always set to the version that was *sent* (never the current one) and never moves backwards; remote changes are applied with `WHERE local_version = <the one read>`.
+  - `POST` is never retried (not idempotent); a timed-out create is linked by `source_id` from the next snapshot. GET/PATCH/DELETE retry in the client.
+  - The local JSON API contract above is untouched: never expose sync columns in the Jbuilder views.
+  - A `ClientError` (4xx except 401/403/404) makes the record a dead letter at once; 401/403 are `AuthenticationError` (retryable, trips the breaker); retryable errors back off per record; 5 consecutive retryable failures abort the cycle.
+  - The first POST of a list carries at most `create_batch_size` items; the rest goes through the item creation strategy (`api_endpoint` continues over several cycles).
+  - Every API call and long loop refreshes the lock with `SyncState.heartbeat_if_due!`; `Syncable#request_sync` never raises.
+- **Config**: `EXTERNAL_TODO_API_URL`, `TODO_SYNC_ENABLED` (`false` disables the automatic sync, it is always off in test), `EXTERNAL_TODO_ITEM_CREATION` (`recreate_list` default, `skip`, `api_endpoint`; the external API can't create items in an existing list). Triggered by `after_commit` on `Syncable` models through `Scheduler.request!` (5 s debounce, one `TodoSyncJob`), and by `bin/rails todo_sync:run` from cron.
+- **Specs**: the external API is faked in-process (`spec/support/external_todo_api.rb`: shared context `'with fake external todo api'` gives `fake_api` and `external_client`; `fake_api.fail_next`/`timeout_next` inject failures, `fake_api.clock` controls remote timestamps). Tag a spec `:todo_sync` to enable the sync; `item_creation_strategy 'skip'` picks a strategy. `webmock` is in the `:test` group and `json` is pinned to `~> 2.9.1` (newer versions break Rails 7.0 and Jbuilder).
 
 ## Git
 

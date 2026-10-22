@@ -33,6 +33,16 @@ describe CompleteAllTodoItemsJob do
       .and have_broadcasted_to(stream).with(a_string_including('data-state="done"', 'Done: 5 items'))
   end
 
+  it 'bumps local_version of the items it completes, and only of those' do
+    already_done = todo_list.todo_items.create!(name: 'Done', completed: true)
+    versions = items.to_h { |item| [item.id, item.local_version] }
+
+    described_class.perform_now(todo_list, up_to_id)
+
+    items.each { |item| expect(item.reload.local_version).to eq(versions[item.id] + 1) }
+    expect(already_done.reload.local_version).to eq(1)
+  end
+
   it 'does not touch items created after the job was enqueued' do
     later_item = todo_list.todo_items.create!(name: 'Created later')
 

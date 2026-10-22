@@ -12,6 +12,7 @@ namespace :dev do
       end)
     end
 
+    TodoSync::Scheduler.request!(reason: :seed_items)
     puts "Inserted #{count} items into todo list ##{todo_list.id} (#{todo_list.name})"
   end
 end

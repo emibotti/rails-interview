@@ -3,7 +3,11 @@ class TodoList < ApplicationRecord
   # (e.g. the process running the job died) and can be taken again.
   MARK_ALL_STALE_AFTER = 2.minutes
 
-  has_many :todo_items, dependent: :destroy
+  include Syncable
+
+  # delete_all: one SQL DELETE, no callbacks per item. The tombstone of the list
+  # covers its items, since deleting a list remotely deletes its items too.
+  has_many :todo_items, dependent: :delete_all
 
   validates :name, presence: true
 
