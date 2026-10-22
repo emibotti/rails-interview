@@ -41,6 +41,7 @@ module TodoSync
 
       status = deletions_allowed ? :succeeded : :aborted_deletions
       run.finish!(status)
+      SyncState.where(id: SyncState::SINGLETON_ID).update_all(last_succeeded_at: Time.current) if status == :succeeded
       Rails.logger.info("[TodoSync] run #{run.id} #{status}: #{run.stats}")
     rescue ExternalTodo::Client::Error => e
       # Without a fresh snapshot nothing else is safe to do: abort the cycle.

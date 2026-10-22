@@ -10,4 +10,31 @@ namespace :todo_sync do
       puts "Error: #{run.error}" if run.error
     end
   end
+
+  desc 'Show the last sync runs and what is pending (dirty records, tombstones, errors)'
+  task status: :environment do
+    state = SyncState.instance
+    puts "Sync #{Rails.configuration.x.todo_sync.enabled ? 'enabled' : 'DISABLED'}; API: #{Rails.configuration.x.external_todo.base_url}; " \
+         "item creation: #{Rails.configuration.x.external_todo.item_creation_strategy}"
+    puts "Lock: #{SyncState.locked? ? "held (heartbeat #{state.lock_heartbeat_at})" : 'free'}; " \
+         "scheduled: #{state.scheduled_at || 'no'}; last success: #{state.last_succeeded_at || 'never'}"
+
+    puts "\nLast runs"
+    SyncRun.order(id: :desc).limit(5).each do |run|
+      duration = run.finished_at && run.started_at ? "#{(run.finished_at - run.started_at).round(2)}s" : '-'
+      puts "  ##{run.id} #{run.trigger} #{run.status} #{duration} #{run.stats}#{" error=#{run.error.truncate(120)}" if run.error}"
+    end
+
+    puts "\nPending"
+    puts "  dirty:      #{TodoList.dirty.count} lists, #{TodoItem.dirty.count} items"
+    puts "  unlinked:   #{TodoList.unlinked.count} lists, #{TodoItem.unlinked.count} items"
+    puts "  tombstones: #{SyncTombstone.count}"
+    SyncTombstone.where('attempts > 0').order(:id).limit(10).each do |tombstone|
+      puts "    #{tombstone.record_type} #{tombstone.external_id} attempts=#{tombstone.attempts} next=#{tombstone.next_attempt_at} #{tombstone.last_error&.truncate(100)}"
+    end
+
+    failed = [TodoList, TodoItem].flat_map { |model| model.where.not(sync_error: nil).limit(10).map { |record| [model.name, record] } }
+    puts "  with errors: #{TodoList.where.not(sync_error: nil).count} lists, #{TodoItem.where.not(sync_error: nil).count} items"
+    failed.each { |type, record| puts "    #{type} #{record.id}: #{record.sync_error.truncate(120)}" }
+  end
 end

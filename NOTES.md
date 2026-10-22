@@ -8,12 +8,12 @@ Sections marked _(planned)_ describe decisions already taken whose code is not w
 
 - Two-way, **state-based** sync of `TodoList` and `TodoItem` with the External Todo API.
 - One idempotent sync cycle: snapshot (one `GET`) → link by `source_id` → apply remote changes →
-  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull, push of creates, push of updates, deletes in both directions, conflict resolution and item creation in existing lists. It is triggered by a debounced job after
+  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull, push of creates, push of updates, deletes in both directions, conflict resolution, item creation in existing lists and the triggers (job, debounce, rake). It is triggered by a debounced job after
   local changes and by a periodic reconciliation (rake task + cron) as a safety net.
 - Components:
   - `ExternalTodo::*` (`app/services/external_todo/`): HTTP client, mapper and value objects. The only code that knows the external wire format.
   - `Syncable` concern + `sync_*` tables: local change tracking.
-  - `TodoSync::*` (`app/services/todo_sync/`): the sync engine (`Runner`, `Snapshot`, `Linker`, `Puller`, `CreatePusher`, `UpdatePusher`, `TombstonePusher`, `ItemCreation::*`, `DeletionGuard`, `BulkWriter` so far).
+  - `TodoSync::*` (`app/services/todo_sync/`): the sync engine (`Runner`, `Snapshot`, `Linker`, `Puller`, `CreatePusher`, `UpdatePusher`, `TombstonePusher`, `ItemCreation::*`, `DeletionGuard`, `Scheduler`, `BulkWriter`, plus `TodoSyncJob`).
   - `FakeExternalTodoApi` (`lib/`): in-memory fake of the external API, used by the specs and for manual runs.
 
 ## Key design decisions
@@ -213,6 +213,30 @@ easy to retire when the API gets the endpoint (a one-line config change, no code
 
 All three share the same shape (`call(snapshot, run, client:)`) and handle the unlinked items of linked lists, grouped by list.
 
+### Triggers: debounced job + periodic reconciliation
+Three ways to run a cycle, all idempotent, all ending in the same `Runner`:
+
+1. **After local changes** (`Syncable` `after_commit` on create, on update of a synced field, and on destroy of a synced record).
+   `TodoSync::Scheduler.request!` enqueues `TodoSyncJob` **5 s later**, and only the winner of a conditional `UPDATE` on `sync_states.scheduled_at`
+   enqueues, so 1000 changes in 5 s are one cycle. `TodoSyncJob` takes no record ids and clears the mark when it starts, so changes made while a
+   cycle runs schedule the next one. A mark older than the debounce plus a minute is considered lost (the `:async` adapter forgets jobs on a Puma
+   restart) and can be taken again.
+2. **Bulk writes** skip callbacks (`update_all`, `insert_all`), so they ask once at the end: `CompleteAllTodoItemsJob` (a mark all of 1000 items enqueues one
+   job and bumps `local_version` in the same `UPDATE`) and `dev:seed_items`.
+3. **Periodic reconciliation**: `bin/rails todo_sync:run` runs a cycle synchronously and prints the summary; put it in cron (example in the README). It is
+   the anti-entropy safety net: it picks up whatever a lost job, a restart or a remote-only change left behind. `bin/rails todo_sync:status` shows the
+   last runs, the lock, dirty/unlinked records, pending tombstones and errors.
+
+- The job never raises. If the lock is taken it asks again instead of dropping the request; if the cycle aborted (the `GET` failed) or crashed it
+  reschedules with an exponential delay (30 s doubling, 15 min cap) based on consecutive failed runs.
+- The sync is controlled by `config.x.todo_sync.enabled`: on in development and production so the whole flow can be exercised end to end, unless
+  `TODO_SYNC_ENABLED=false` (do that with a huge local database: the first sync uploads everything, one `POST` per list), and **off in test** so the existing
+  specs never enqueue `TodoSyncJob` or touch the network. Specs of the sync opt in with the `:todo_sync` tag.
+- Feature flag for the riskiest part: `EXTERNAL_TODO_ITEM_CREATION=skip` switches the `recreate_list` workaround off (new items in synced lists are then flagged, not sent),
+  if it turns out to be out of scope.
+- Remote → local changes are only seen by the periodic run (the API has no webhooks), so the cron frequency is the staleness bound for them.
+- Not done: asking for a sync when Puma boots (Puma 5.6 has no `on_booted` hook); the cron run covers it.
+
 ### Locks with heartbeat
 `SyncState` is a single-row table with `scheduled_at` (debounce mark) and `lock_heartbeat_at`. The lock is taken with a
 conditional `UPDATE` and is considered abandoned after 5 minutes without a heartbeat, the same pattern as
@@ -269,6 +293,9 @@ Handled so far (each has a spec):
 - New items in a synced list: 1 POST + 1 DELETE per list with `recreate_list`; a failed DELETE leaves a recoverable duplicate; a POST that timed out is
   adopted next cycle without duplicates; lists above `recreate_max_items` fall back to `skip`.
 - Two remote lists sharing a `source_id` are told apart by content (the one holding the unlinked items is the recreated one).
+- 10 consecutive changes enqueue one job; a mark all of 1000 items enqueues one job; a lost schedule mark is recovered; a job that finds the lock
+  taken asks again; a failed `GET` reschedules with backoff.
+- Changes on both sides (creates, edits, deletes) converge after one cycle, and the next one makes a single request (an end-to-end spec).
 - Running the pull twice writes nothing; a remote change to a clean record is applied without bumping `local_version`.
 - A record dirty locally is not overwritten by a remote change, and neither is one edited while the pull was running.
 - Remote records with a blank name or no id are skipped, not imported.
@@ -314,7 +341,7 @@ The fake external API:
 bin/fake_external_api                    # http://localhost:4000, state in memory
 FAKE_SUPPORTS_ITEM_CREATION=true bin/fake_external_api   # also serves the proposed POST /todolists/:id/todoitems
 EXTERNAL_TODO_ITEM_CREATION=recreate_list|skip|api_endpoint bin/puma   # how new items in synced lists reach the API
-EXTERNAL_TODO_API_URL=http://localhost:4000 bin/puma
+EXTERNAL_TODO_API_URL=http://localhost:4000 bin/puma   # the sync is on in development; TODO_SYNC_ENABLED=false turns it off
 ```
 
 Run one sync cycle (link, pull, push creates): `bin/rails todo_sync:run` (prints the run summary).

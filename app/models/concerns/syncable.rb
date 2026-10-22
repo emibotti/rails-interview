@@ -15,6 +15,12 @@ module Syncable
     before_update :bump_local_version, if: :sync_relevant_changes?
     after_destroy :record_tombstone, if: :external_id?
 
+    # Ask for a (debounced) sync once the change is committed. Bulk writes skip these callbacks
+    # and ask once at the end by themselves (CompleteAllTodoItemsJob, dev:seed_items).
+    after_create_commit { request_sync(:created) }
+    after_update_commit(if: :sync_relevant_saved_changes?) { request_sync(:updated) }
+    after_destroy_commit(if: :external_id?) { request_sync(:destroyed) }
+
     scope :dirty, -> { where("#{table_name}.local_version > #{table_name}.synced_version") }
     scope :linked, -> { where.not(external_id: nil) }
     scope :unlinked, -> { where(external_id: nil) }
@@ -35,6 +41,14 @@ module Syncable
 
   def sync_relevant_changes?
     self.class.sync_attributes.any? { |attribute| will_save_change_to_attribute?(attribute) }
+  end
+
+  def sync_relevant_saved_changes?
+    self.class.sync_attributes.any? { |attribute| saved_change_to_attribute?(attribute) }
+  end
+
+  def request_sync(action)
+    TodoSync::Scheduler.request!(reason: "#{self.class.name.underscore}_#{action}")
   end
 
   def bump_local_version

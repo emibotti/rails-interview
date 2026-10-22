@@ -39,6 +39,9 @@ class CompleteAllTodoItemsJob < ApplicationJob
 
     todo_list.release_mark_all_lock!
     broadcast_status(todo_list, state: :done, processed: processed, total: total)
+
+    # The batches skip callbacks, so ask for a single (debounced) sync at the end.
+    TodoSync::Scheduler.request!(reason: :mark_all) if processed.positive?
   end
 
   def broadcast_status(todo_list, **locals)
