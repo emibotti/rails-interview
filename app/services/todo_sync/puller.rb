@@ -33,6 +33,7 @@ module TodoSync
 
       @snapshot.lists.each do |remote_list|
         TodoList.transaction { pull_list(remote_list, local_lists[remote_list.external_id]) }
+        SyncState.heartbeat_if_due!
         # Share the GVL with Puma's request threads, like CompleteAllTodoItemsJob.
         Thread.pass
       end

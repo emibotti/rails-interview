@@ -25,12 +25,23 @@ module TodoSync
 
         remote_lists.each do |remote_list|
           link_list(local_list, remote_list)
-          link_items(local_list, remote_list) if linked_to?(local_list, remote_list)
+          link_items(local_list.id, remote_list) if linked_to?(local_list, remote_list)
         end
       end
+      link_items_of_other_lists
     end
 
     private
+
+    # Items we created (POST item with a timeout) inside lists that were not created by us, e.g. imported ones.
+    def link_items_of_other_lists
+      ours = @snapshot.lists_by_source_id.values.flatten.to_set(&:external_id)
+      local_ids = TodoList.linked.pluck(:external_id, :id).to_h
+      @snapshot.lists.each do |remote_list|
+        local_id = local_ids[remote_list.external_id]
+        link_items(local_id, remote_list) if local_id && !ours.include?(remote_list.external_id)
+      end
+    end
 
     def link_list(local_list, remote_list)
       if local_list.external_id.nil?
@@ -100,13 +111,18 @@ module TodoSync
       local_list.external_id.nil? || local_list.external_id == remote_list.external_id
     end
 
-    def link_items(local_list, remote_list)
+    # Only the items that are still unlinked locally are written, so a cycle with nothing to link does no UPDATE at all.
+    def link_items(local_list_id, remote_list)
+      unlinked_ids = nil
       remote_list.items.each do |remote_item|
         kind, local_id = ExternalTodo::SourceId.parse(remote_item.source_id)
         next unless kind == :item && remote_item.external_id.present?
 
-        # Only items of this very list; the unlinked condition keeps it idempotent.
-        linked = link(TodoItem, local_id, remote_item, todo_list_id: local_list.id)
+        unlinked_ids ||= TodoItem.where(todo_list_id: local_list_id, external_id: nil).pluck(:id).to_set
+        next unless unlinked_ids.include?(local_id)
+
+        # The conditions keep it idempotent and restricted to this very list.
+        linked = link(TodoItem, local_id, remote_item, todo_list_id: local_list_id)
         @run.increment_stat(:items_linked) if linked == 1
       end
     end

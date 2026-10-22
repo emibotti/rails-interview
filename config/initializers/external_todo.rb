@@ -18,6 +18,12 @@ Rails.application.configure do
   config.x.external_todo.item_creation_strategy = ENV.fetch("EXTERNAL_TODO_ITEM_CREATION", "recreate_list")
   config.x.external_todo.recreate_max_items = 5000
 
+  # A list is uploaded with at most this many items in its first POST; the rest are created later by the item creation
+  # strategy (api_endpoint does it in batches over several cycles, a background job each).
+  config.x.external_todo.create_batch_size = 5000
+  # Items created per cycle by the api_endpoint strategy before asking for another cycle.
+  config.x.external_todo.item_creation_batch_size = 1000
+
   # Deletion guard: refuse local deletions when more than this share of the linked
   # lists is missing from the snapshot (only with at least guard_min_linked of them).
   config.x.todo_sync.guard_min_linked = 5

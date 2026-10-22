@@ -14,11 +14,14 @@ module TodoSync
     def call
       return :busy unless SyncState.acquire_lock!
 
-      run = SyncRun.start!(@trigger)
-      Rails.logger.tagged("todo_sync", "run=#{run.id}") { execute(run) }
-      run
-    ensure
-      SyncState.release_lock! if run
+      begin
+        run = SyncRun.start!(@trigger)
+        Rails.logger.tagged("todo_sync", "run=#{run.id}") { execute(run) }
+        run
+      ensure
+        # Released even if the run could not be created, otherwise every cycle would be :busy until the lock goes stale.
+        SyncState.release_lock!
+      end
     end
 
     private

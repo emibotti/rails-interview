@@ -30,7 +30,7 @@ module TodoSync
         else
           delete_remote(tombstone)
         end
-        SyncState.heartbeat!
+        SyncState.heartbeat_if_due!
       end
     end
 

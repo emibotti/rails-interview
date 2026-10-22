@@ -74,7 +74,9 @@ Two-way, state-based sync of lists and items with an external REST API. Design, 
   - `synced_version` is always set to the version that was *sent* (never the current one) and never moves backwards; remote changes are applied with `WHERE local_version = <the one read>`.
   - `POST` is never retried (not idempotent); a timed-out create is linked by `source_id` from the next snapshot. GET/PATCH/DELETE retry in the client.
   - The local JSON API contract above is untouched: never expose sync columns in the Jbuilder views.
-  - A `ClientError` (4xx) makes the record a dead letter at once; retryable errors back off per record; 5 consecutive retryable failures abort the cycle.
+  - A `ClientError` (4xx except 401/403/404) makes the record a dead letter at once; 401/403 are `AuthenticationError` (retryable, trips the breaker); retryable errors back off per record; 5 consecutive retryable failures abort the cycle.
+  - The first POST of a list carries at most `create_batch_size` items; the rest goes through the item creation strategy (`api_endpoint` continues over several cycles).
+  - Every API call and long loop refreshes the lock with `SyncState.heartbeat_if_due!`; `Syncable#request_sync` never raises.
 - **Config**: `EXTERNAL_TODO_API_URL`, `TODO_SYNC_ENABLED` (`false` disables the automatic sync, it is always off in test), `EXTERNAL_TODO_ITEM_CREATION` (`recreate_list` default, `skip`, `api_endpoint`; the external API can't create items in an existing list). Triggered by `after_commit` on `Syncable` models through `Scheduler.request!` (5 s debounce, one `TodoSyncJob`), and by `bin/rails todo_sync:run` from cron.
 - **Specs**: the external API is faked in-process (`spec/support/external_todo_api.rb`: shared context `'with fake external todo api'` gives `fake_api` and `external_client`; `fake_api.fail_next`/`timeout_next` inject failures, `fake_api.clock` controls remote timestamps). Tag a spec `:todo_sync` to enable the sync; `item_creation_strategy 'skip'` picks a strategy. `webmock` is in the `:test` group and `json` is pinned to `~> 2.9.1` (newer versions break Rails 7.0 and Jbuilder).
 

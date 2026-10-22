@@ -56,8 +56,12 @@ module Syncable
     self.class.sync_attributes.any? { |attribute| saved_change_to_attribute?(attribute) }
   end
 
+  # Runs after the change was committed: a failure here must not turn a successful write into a 500 for the
+  # client. The periodic todo_sync:run picks up whatever this request would have scheduled.
   def request_sync(action)
     TodoSync::Scheduler.request!(reason: "#{self.class.name.underscore}_#{action}")
+  rescue StandardError => e
+    Rails.logger.error("[TodoSync] could not request a sync after #{self.class.name} #{action}: #{e.class}: #{e.message}")
   end
 
   def bump_local_version

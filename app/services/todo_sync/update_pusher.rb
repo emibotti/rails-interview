@@ -12,7 +12,7 @@ module TodoSync
   # synced_version is set to the version that was read before the call, never the
   # current one, so an edit made during the PATCH leaves the record dirty.
   class UpdatePusher
-    HEARTBEAT_EVERY = 100
+    HEARTBEAT_EVERY = 100 # records between Thread.pass calls
 
     def self.call(snapshot, run, client:)
       new(snapshot, run, client).call
@@ -129,10 +129,8 @@ module TodoSync
 
     def tick
       @processed += 1
-      return unless (@processed % HEARTBEAT_EVERY).zero?
-
-      SyncState.heartbeat!
-      Thread.pass
+      SyncState.heartbeat_if_due!
+      Thread.pass if (@processed % HEARTBEAT_EVERY).zero?
     end
   end
 end

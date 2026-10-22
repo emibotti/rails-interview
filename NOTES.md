@@ -137,7 +137,13 @@ Each local list without `external_id` is sent with **all** its items in one `POS
   matters for lists with 100k items (a CTE is needed because SQLite has no `AS v(columns)` alias for subqueries).
 - A `TimeoutError` is counted and the list is left for the next cycle (to be linked if it was created). A `4xx` or `5xx` is recorded
   against that list (backoff or dead letter, see "Resilience") and the cycle continues with the next list.
-- Trade-off: a list with a huge number of items is one huge request. The plan caps the lists we *recreate* (D9), not the first upload.
+- **Big lists are uploaded in batches.** The first `POST` carries at most `create_batch_size` items (5000): a huge body times out, and a timeout is
+  ambiguous. The rest are unlinked items of a now linked list (`stats["items_deferred"]`) and the item creation strategy takes over. With `api_endpoint` they
+  are created `item_creation_batch_size` (1000) per cycle; if more are waiting the cycle asks for another one (`Scheduler.request!`), which is its own
+  background job, so the lock is released between batches and other changes and the pull get their turn. With the default `recreate_list`, a list above
+  `recreate_max_items` cannot be recreated, so the remaining items are flagged with a message that points to `api_endpoint`. In other words, a list bigger
+  than 5000 items only syncs completely once the API can create items in an existing list; until then the first 5000 are synced and the rest is reported,
+  never silently dropped.
 
 ### Pushing updates (`TodoSync::UpdatePusher`)
 Dirty linked lists and items (items only if their list is linked) are **compared with the snapshot before anything is sent**:
@@ -279,7 +285,12 @@ Across cycles (the state lives in the database, so it survives restarts):
 - Dead letters are not lost or hidden: `bin/rails todo_sync:failed` lists them with their error, `todo_sync:retry_failed` resets them and asks for a sync
   (after fixing the cause), and `todo_sync:status` counts them. Tombstones that gave up are kept too. Records skipped by the item creation `skip` strategy
   are not dead letters and `retry_failed` leaves them alone.
-- Stale lock recovery: a cycle that dies (a Puma restart) leaves the lock with an old heartbeat; after 5 minutes the next cycle takes it.
+- Stale lock recovery: a cycle that dies (a Puma restart) leaves the lock with an old heartbeat; after 5 minutes the next cycle takes it. The heartbeat is refreshed
+  (at most every 30 s) before every API call and in the long loops, so a slow API cannot make a live cycle look abandoned and let a second one in; the lock is
+  released even if the run row cannot be created.
+- `401`/`403` are **systemic**, not a problem of one record (wrong credentials, no permission): they are `AuthenticationError`, a retryable error that counts towards the
+  circuit breaker, so a bad token aborts the cycle and backs off instead of dead-lettering every record in one pass.
+- Requesting a sync after a commit never turns a successful write into an error: the failure is logged and the periodic run covers it.
 - One bad record never blocks the rest, but a dead letter that stays dirty keeps being skipped, so it can lag behind forever until someone looks at it.
 
 ## Observability
@@ -324,7 +335,14 @@ Local costs: remote imports use `insert_all` in batches of 1000; sync state is w
 one SQL `DELETE`; the "what is dirty" query uses a partial index; long loops call `Thread.pass` and refresh the lock heartbeat because SQLite and the job share
 Puma's process.
 
-Known costs, accepted: the snapshot is loaded in memory (the `GET` cannot be paged; streaming the JSON is future work); a mark all of 100k items is 100k `PATCH`es
+Known costs, accepted (the first two were raised by the final code review):
+
+- **The pull reads every linked local item of every list, each cycle**, to compare it with the snapshot: O(items) in memory and queries even when nothing changed. Fine for
+  thousands of items, heavy for 100k+. The fix is to load only the lists whose remote `updated_at` moved (or to stream by list); it changes the shape of the pull, so it is future work.
+- **Any `404` on a `PATCH` is read as "deleted remotely"** and deletes the local record (a list with its items) without a tombstone, as the design says (delete wins). A proxy
+  answering a spurious 404 would lose a pending local edit; the deletion guard is not consulted on that path. Acceptable for a first version, but worth hardening
+  (for example confirming against the next snapshot before deleting).
+ the snapshot is loaded in memory (the `GET` cannot be paged; streaming the JSON is future work); a mark all of 100k items is 100k `PATCH`es
 because there is no bulk endpoint (suggested change below; bounded concurrency is future work); the first upload of a huge list is one big `POST`; SQLite allows a single writer.
 
 ## Edge cases
@@ -392,6 +410,7 @@ Each of these has a spec:
 - Sidekiq (with Redis for Action Cable): jobs that survive restarts, work outside Puma, native retries and a dead set.
 - Field-level three-way merge, streaming JSON parsing for huge snapshots, persistent connections or bounded concurrency for mass `PATCH`es.
 - Soft delete / undo through tombstone payloads; admin UI for dead letters; metrics.
+- Pull only the lists that changed instead of reading every linked item each cycle; confirm a `PATCH` 404 against the snapshot before deleting.
 - Extract the heartbeat lock shared by `TodoList` and `SyncState` into a concern.
 
 ## How to run
@@ -418,7 +437,7 @@ Configuration (environment variables):
 |---|---|---|
 | `EXTERNAL_TODO_API_URL` | `http://localhost:4000` | Base URL of the external API. |
 | `TODO_SYNC_ENABLED` | on (off in test) | `false` turns the automatic sync off (use it with a huge local database: the first sync uploads everything). |
-| `EXTERNAL_TODO_ITEM_CREATION` | `recreate_list` | How new items in synced lists reach the API: `recreate_list`, `skip` or `api_endpoint`. |
+| `EXTERNAL_TODO_ITEM_CREATION` | `recreate_list` | How new items in synced lists reach the API: `recreate_list`, `skip` or `api_endpoint` (the only one that completes lists above 5000 items). |
 | `FAKE_SUPPORTS_ITEM_CREATION` | `false` | Makes the fake serve the proposed `POST /todolists/:id/todoitems` (for `api_endpoint`). |
 
 Other settings (timeouts, retries, backoff, circuit breaker, guard thresholds, `recreate_max_items`) are in `config/initializers/external_todo.rb`.

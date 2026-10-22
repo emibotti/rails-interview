@@ -55,11 +55,21 @@ RSpec.describe ExternalTodo::Client do
 
     it "reports a 4xx with a non JSON body by its status, without retrying" do
       stub = stub_request(:get, "http://external.test/todolists").to_return(
-        status: 403, body: "Forbidden", headers: { "Content-Type" => "application/json" }
+        status: 409, body: "Conflict", headers: { "Content-Type" => "application/json" }
       )
 
-      expect { client.list_todo_lists }.to raise_error(ExternalTodo::Client::ClientError, /failed with 403: Forbidden/)
+      expect { client.list_todo_lists }.to raise_error(ExternalTodo::Client::ClientError, /failed with 409: Conflict/)
       expect(stub).to have_been_requested.once
+    end
+
+    it "reports 401 and 403 as AuthenticationError (systemic, retryable), without retrying the request" do
+      [401, 403].each do |status|
+        stub = stub_request(:get, "http://external.test/todolists").to_return(status: status, body: "{}", headers: { "Content-Type" => "application/json" })
+
+        expect { client.list_todo_lists }.to raise_error(ExternalTodo::Client::AuthenticationError) { |e| expect(e).to be_a(ExternalTodo::Client::RetryableError) }
+        expect(stub).to have_been_requested.once
+        WebMock.reset!
+      end
     end
 
     it "retries a timeout and succeeds" do

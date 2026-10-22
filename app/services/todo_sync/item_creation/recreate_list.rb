@@ -27,12 +27,13 @@ module TodoSync
           total = TodoItem.where(todo_list_id: list.id).count
           max = Rails.configuration.x.external_todo.recreate_max_items
           if total > max
-            Skip.new(@run).call("list has #{total} items, above recreate_max_items=#{max}", only_list_ids: [list.id])
+            Skip.new(@run).call("list has #{total} items, above recreate_max_items=#{max}; use EXTERNAL_TODO_ITEM_CREATION=api_endpoint " \
+                                "once the API can create items in an existing list", only_list_ids: [list.id])
           else
             ItemCreation.clear_errors(list.id)
             recreate(list)
           end
-          SyncState.heartbeat!
+          SyncState.heartbeat_if_due!
           Thread.pass
         end
       end
@@ -62,7 +63,10 @@ module TodoSync
       end
 
       def save(list, items, remote)
-        by_id = remote.items.index_by { |remote_item| ExternalTodo::SourceId.parse(remote_item.source_id)&.last }
+        by_id = remote.items.each_with_object({}) do |remote_item, index|
+          kind, id = ExternalTodo::SourceId.parse(remote_item.source_id)
+          index[id] = remote_item if kind == :item
+        end
         unless items.all? { |item| by_id.key?(item.id) }
           # Not matchable: keep the old list, and the next snapshot will show two lists for the Linker to sort out.
           @run.increment_stat(:unpaired_items, items.size)

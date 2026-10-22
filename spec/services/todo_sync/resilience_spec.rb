@@ -112,12 +112,12 @@ RSpec.describe TodoSync::Runner do
   describe 'tombstones' do
     it 'go to dead letter on a client error and are not retried' do
       items.first.destroy!
-      fake_api.fail_next(:delete, %r{todoitems}, status: 403)
+      fake_api.fail_next(:delete, %r{todoitems}, status: 409)
 
       sync
 
       expect(SyncTombstone.first).to have_attributes(attempts: TodoSync::Backoff.max_attempts, next_attempt_at: nil,
-                                                    last_error: a_string_including('dead letter', '403'))
+                                                    last_error: a_string_including('dead letter', '409'))
       deletes = fake_api.requests.count { |method, *| method == 'DELETE' }
       travel_to(2.days.from_now) { sync }
       expect(fake_api.requests.count { |method, *| method == 'DELETE' }).to eq(deletes)
@@ -168,7 +168,7 @@ RSpec.describe TodoSync::Runner do
       fake_api.fail_next(:patch, %r{todoitems}, status: 422)
       sync
       items.last.destroy!
-      fake_api.fail_next(:delete, %r{todoitems}, status: 403)
+      fake_api.fail_next(:delete, %r{todoitems}, status: 409)
       sync
 
       expect(TodoSync::DeadLetters.all.map(&:first)).to contain_exactly('TodoItem', 'SyncTombstone')

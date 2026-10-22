@@ -17,7 +17,7 @@ module TodoSync
     def call
       TodoList.unlinked.ready_to_sync.select(:id, :name, :local_version).find_each do |list|
         push(list)
-        SyncState.heartbeat!
+        SyncState.heartbeat_if_due!
         Thread.pass
       end
     end
@@ -25,7 +25,12 @@ module TodoSync
     private
 
     def push(list)
-      items = TodoItem.where(todo_list_id: list.id).order(:id).select(:id, :name, :completed, :local_version).to_a
+      all_items = TodoItem.where(todo_list_id: list.id)
+      # The first POST carries at most create_batch_size items: a huge body times out, and a timeout is ambiguous. The
+      # rest are unlinked items of a linked list, which the item creation strategy takes over (see ItemCreation).
+      items = all_items.order(:id).limit(Rails.configuration.x.external_todo.create_batch_size)
+                       .select(:id, :name, :completed, :local_version).to_a
+      deferred = all_items.count - items.size
 
       remote = @client.create_todo_list(
         name: list.name,
@@ -34,7 +39,9 @@ module TodoSync
       )
       @run.increment_stat(:remote_calls)
       save_links(list, items, remote)
-      OperationLog.success(@client, "POST list", local: list.id, remote: remote.external_id, detail: "(#{items.size} items)")
+      OperationLog.success(@client, "POST list", local: list.id, remote: remote.external_id,
+                                                 detail: "(#{items.size} items#{", #{deferred} deferred" if deferred.positive?})")
+      @run.increment_stat(:items_deferred, deferred) if deferred.positive?
     rescue ExternalTodo::Client::TimeoutError => e
       # Ambiguous: don't re-POST in this cycle, the next snapshot tells.
       @run.increment_stat(:remote_calls)
@@ -66,7 +73,10 @@ module TodoSync
     # [[local_item, remote_item], ...] matched by source_id. If the API doesn't
     # echo the source_ids, falls back to the order in which they were sent.
     def pair_items(list, items, remote)
-      by_id = remote.items.index_by { |remote_item| ExternalTodo::SourceId.parse(remote_item.source_id)&.last }
+      by_id = remote.items.each_with_object({}) do |remote_item, index|
+        kind, id = ExternalTodo::SourceId.parse(remote_item.source_id)
+        index[id] = remote_item if kind == :item
+      end
       if items.all? { |item| by_id.key?(item.id) }
         return items.map { |item| [item, by_id[item.id]] }
       end

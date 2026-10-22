@@ -12,16 +12,27 @@ class SyncState < ApplicationRecord
   end
 
   # Atomically takes the lock with a conditional UPDATE.
+  # How often long loops refresh the heartbeat: well below LOCK_STALE_AFTER, without a write per record.
+  HEARTBEAT_EVERY = 30.seconds
+
   def self.acquire_lock!
     instance
     now = Time.current
-    where(id: SINGLETON_ID)
-      .where("lock_heartbeat_at IS NULL OR lock_heartbeat_at < ?", now - LOCK_STALE_AFTER)
-      .update_all(lock_heartbeat_at: now) == 1
+    acquired = where(id: SINGLETON_ID)
+               .where("lock_heartbeat_at IS NULL OR lock_heartbeat_at < ?", now - LOCK_STALE_AFTER)
+               .update_all(lock_heartbeat_at: now) == 1
+    @last_heartbeat_at = now if acquired
+    acquired
   end
 
   def self.heartbeat!
-    where(id: SINGLETON_ID).update_all(lock_heartbeat_at: Time.current)
+    @last_heartbeat_at = Time.current
+    where(id: SINGLETON_ID).update_all(lock_heartbeat_at: @last_heartbeat_at)
+  end
+
+  # Cheap to call from any loop or before any API call: writes at most every HEARTBEAT_EVERY.
+  def self.heartbeat_if_due!
+    heartbeat! if @last_heartbeat_at.nil? || @last_heartbeat_at < HEARTBEAT_EVERY.ago
   end
 
   def self.release_lock!

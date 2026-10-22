@@ -12,18 +12,36 @@ module TodoSync
         @client = client
       end
 
+      # Creates at most item_creation_batch_size items per cycle. If more are waiting it asks for another cycle,
+      # which runs as its own background job, so a list with 100k new items is uploaded in batches, each one
+      # releasing the lock, and other changes and the pull get their turn in between.
       def call
+        remaining = Rails.configuration.x.external_todo.item_creation_batch_size
+
         ItemCreation.lists_with_unlinked_items.each do |list|
+          break if remaining <= 0
+
           ItemCreation.clear_errors(list.id)
-          TodoItem.unlinked.ready_to_sync.where(todo_list_id: list.id).select(:id, :name, :completed, :local_version).find_each do |item|
+          items = TodoItem.unlinked.ready_to_sync.where(todo_list_id: list.id).order(:id)
+                          .limit(remaining).select(:id, :name, :completed, :local_version).to_a
+          items.each do |item|
             create(list, item)
-            SyncState.heartbeat!
+            SyncState.heartbeat_if_due!
             Thread.pass
           end
+          remaining -= items.size
         end
+
+        continue_later if ItemCreation.lists_with_unlinked_items.exists?
       end
 
       private
+
+      def continue_later
+        @run.increment_stat(:item_creation_continues)
+        Rails.logger.info("[TodoSync] more items are waiting to be created; asking for another cycle")
+        TodoSync::Scheduler.request!(reason: :continue_item_creation)
+      end
 
       def create(list, item)
         remote = @client.create_todo_item(list.external_id, name: item.name, completed: item.completed,

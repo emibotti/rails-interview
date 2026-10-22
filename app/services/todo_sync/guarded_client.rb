@@ -24,6 +24,8 @@ module TodoSync
           raise CircuitOpenError, "circuit breaker open after #{@consecutive_failures} consecutive failures"
         end
 
+        # A slow API must not make the lock look abandoned while we wait for it.
+        SyncState.heartbeat_if_due!
         call(name, args, kwargs)
       end
     end

@@ -34,6 +34,9 @@ module ExternalTodo
 
     # Connection errors, 408, 429 and 5xx.
     class RetryableError < Error; end
+    # 401 and 403: a systemic problem (wrong credentials, no permission), not a problem of one record. It counts
+    # towards the circuit breaker and backs off instead of dead-lettering every record.
+    class AuthenticationError < RetryableError; end
     # Ambiguous: the server may have processed the request. Matters for POST.
     class TimeoutError < RetryableError; end
     # Other 4xx. Retrying will not help.
@@ -173,6 +176,7 @@ module ExternalTodo
     def error_for(http_method, path, status, body)
       error_class =
         if status == 404 then NotFoundError
+        elsif [401, 403].include?(status) then AuthenticationError
         elsif status == 408 || RETRY_STATUSES.include?(status) || status >= 500 then RetryableError
         elsif status >= 400 then ClientError
         else InvalidResponseError
