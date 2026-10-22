@@ -57,11 +57,10 @@ module TodoSync
         @run.increment_stat(:remote_calls)
         @run.increment_stat(:create_timeouts)
         Rails.logger.warn("[TodoSync] recreating list #{list.id} timed out; the Linker adopts it next cycle if it was created (#{e.message})")
+        Failures.record(TodoList, list.id, e, run: @run)
       rescue ExternalTodo::Client::Error => e
-        # TODO: per-record backoff and dead letters instead of just counting the failure (step 10).
         @run.increment_stat(:remote_calls)
-        @run.increment_stat(:failures)
-        Rails.logger.error("[TodoSync] recreating list #{list.id} failed: #{e.message}")
+        Failures.record(TodoList, list.id, e, run: @run)
       end
 
       def save(list, items, remote)
@@ -77,7 +76,8 @@ module TodoSync
         TodoList.transaction do
           # The old list must still be the one we point to, otherwise someone else already moved it.
           moved = TodoList.where(id: list.id, external_id: old_external_id).update_all(
-            ["external_id = ?, remote_updated_at = ?, synced_version = MAX(synced_version, ?)",
+            ["external_id = ?, remote_updated_at = ?, synced_version = MAX(synced_version, ?), " \
+             "sync_attempts = 0, next_sync_at = NULL, sync_error = NULL",
              remote.external_id, remote.updated_at, list.local_version]
           )
           next if moved.zero?

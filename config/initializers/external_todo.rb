@@ -23,6 +23,13 @@ Rails.application.configure do
   config.x.todo_sync.guard_min_linked = 5
   config.x.todo_sync.guard_max_missing_ratio = 0.5
 
+  # Retries that span sync cycles: per record exponential backoff with jitter, dead letter after max_attempts,
+  # and the circuit breaker that aborts a cycle after this many consecutive retryable failures.
+  config.x.todo_sync.backoff_base = 30.seconds
+  config.x.todo_sync.backoff_max = 1.hour
+  config.x.todo_sync.max_attempts = 8
+  config.x.todo_sync.circuit_breaker_threshold = 5
+
   # On in development and production (TODO_SYNC_ENABLED=false turns it off, e.g. with a huge local database,
   # since the first sync uploads everything). Off in test so the existing specs never enqueue TodoSyncJob or
   # hit the network (specs of the sync use the :todo_sync tag).

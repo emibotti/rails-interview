@@ -11,6 +11,9 @@
 module Syncable
   extend ActiveSupport::Concern
 
+  # Written together with synced_version when an operation succeeds: forgets previous failures.
+  SYNC_OK = { sync_attempts: 0, next_sync_at: nil, sync_error: nil }.freeze
+
   included do
     before_update :bump_local_version, if: :sync_relevant_changes?
     after_destroy :record_tombstone, if: :external_id?
@@ -21,6 +24,12 @@ module Syncable
     after_update_commit(if: :sync_relevant_saved_changes?) { request_sync(:updated) }
     after_destroy_commit(if: :external_id?) { request_sync(:destroyed) }
 
+    # Records the pushers may try now: not waiting for a retry and not a dead letter.
+    scope :ready_to_sync, lambda {
+      where("#{table_name}.next_sync_at IS NULL OR #{table_name}.next_sync_at <= ?", Time.current)
+        .where("#{table_name}.sync_attempts < ?", TodoSync::Backoff.max_attempts)
+    }
+    scope :dead_letters, -> { where("#{table_name}.sync_attempts >= ?", TodoSync::Backoff.max_attempts) }
     scope :dirty, -> { where("#{table_name}.local_version > #{table_name}.synced_version") }
     scope :linked, -> { where.not(external_id: nil) }
     scope :unlinked, -> { where(external_id: nil) }

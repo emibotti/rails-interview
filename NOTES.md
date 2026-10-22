@@ -8,12 +8,12 @@ Sections marked _(planned)_ describe decisions already taken whose code is not w
 
 - Two-way, **state-based** sync of `TodoList` and `TodoItem` with the External Todo API.
 - One idempotent sync cycle: snapshot (one `GET`) → link by `source_id` → apply remote changes →
-  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull, push of creates, push of updates, deletes in both directions, conflict resolution, item creation in existing lists and the triggers (job, debounce, rake). It is triggered by a debounced job after
+  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull, push of creates, push of updates, deletes in both directions, conflict resolution, item creation in existing lists, the triggers (job, debounce, rake) and per-record resilience. It is triggered by a debounced job after
   local changes and by a periodic reconciliation (rake task + cron) as a safety net.
 - Components:
   - `ExternalTodo::*` (`app/services/external_todo/`): HTTP client, mapper and value objects. The only code that knows the external wire format.
   - `Syncable` concern + `sync_*` tables: local change tracking.
-  - `TodoSync::*` (`app/services/todo_sync/`): the sync engine (`Runner`, `Snapshot`, `Linker`, `Puller`, `CreatePusher`, `UpdatePusher`, `TombstonePusher`, `ItemCreation::*`, `DeletionGuard`, `Scheduler`, `BulkWriter`, plus `TodoSyncJob`).
+  - `TodoSync::*` (`app/services/todo_sync/`): the sync engine (`Runner`, `Snapshot`, `Linker`, `Puller`, `CreatePusher`, `UpdatePusher`, `TombstonePusher`, `ItemCreation::*`, `DeletionGuard`, `Scheduler`, `Backoff`, `Failures`, `GuardedClient`, `DeadLetters`, `BulkWriter`, plus `TodoSyncJob`).
   - `FakeExternalTodoApi` (`lib/`): in-memory fake of the external API, used by the specs and for manual runs.
 
 ## Key design decisions
@@ -261,7 +261,25 @@ Implemented in `ExternalTodo::Client`:
   the client turns it into the proper error.
 - Every request is logged (`[ExternalTodo] PATCH /todolists/x -> 200 (12.3ms)`), and retries and failures at `warn`.
 
-Planned: per-record backoff and dead letters, circuit breaker, mass-deletion guard, stale lock recovery.
+Across cycles (the state lives in the database, so it survives restarts):
+
+| What failed | What the sync does |
+|---|---|
+| The `GET` of the snapshot | Aborts the whole cycle (`aborted`): pushing without a fresh snapshot risks duplicates and overwrites. The job reschedules with backoff (30 s doubling, 15 min cap, jittered) based on consecutive failed runs. |
+| A retryable error on one record (connection, timeout, 408/429/5xx, invalid response) | `sync_attempts + 1`, `next_sync_at` with exponential backoff and jitter (base 30 s, cap 1 h), `sync_error` stored. The pushers skip the record until then and go on with the others. |
+| A timeout on a `POST` | Same as above, but never re-POSTed: the next snapshot shows whether it was created and the Linker binds it by `source_id`. |
+| A client error (422 and other 4xx) | **Dead letter immediately**: retrying cannot help. The record keeps its data and its error and is skipped. |
+| Too many attempts (8) | Dead letter. |
+| 404 on `DELETE` / `PATCH` | `DELETE`: success. `PATCH`: the record is gone remotely, the delete wins. |
+| N (5) consecutive retryable failures in one cycle | **Circuit breaker** (`GuardedClient`): the next call raises instead of hitting the API and the run is `aborted`. Any answer from the server, even a 4xx, resets the count. |
+| Success | `sync_attempts`, `next_sync_at` and `sync_error` are reset (also on batch updates and on linking). |
+
+- Backoff is equal jitter: half of the exponential delay is fixed and half random, so records that failed together do not come back together.
+- Dead letters are not lost or hidden: `bin/rails todo_sync:failed` lists them with their error, `todo_sync:retry_failed` resets them and asks for a sync
+  (after fixing the cause), and `todo_sync:status` counts them. Tombstones that gave up are kept too. Records skipped by the item creation `skip` strategy
+  are not dead letters and `retry_failed` leaves them alone.
+- Stale lock recovery: a cycle that dies (a Puma restart) leaves the lock with an old heartbeat; after 5 minutes the next cycle takes it.
+- One bad record never blocks the rest, but a dead letter that stays dirty keeps being skipped, so it can lag behind forever until someone looks at it.
 
 ## Performance
 
@@ -296,6 +314,8 @@ Handled so far (each has a spec):
 - 10 consecutive changes enqueue one job; a mark all of 1000 items enqueues one job; a lost schedule mark is recovered; a job that finds the lock
   taken asks again; a failed `GET` reschedules with backoff.
 - Changes on both sides (creates, edits, deletes) converge after one cycle, and the next one makes a single request (an end-to-end spec).
+- A record that keeps failing backs off between cycles and becomes a dead letter; a 422 does so at once; the rest of the records go on.
+- The API is down: the circuit breaker cuts the cycle after 5 consecutive failures instead of trying every record.
 - Running the pull twice writes nothing; a remote change to a clean record is applied without bumping `local_version`.
 - A record dirty locally is not overwritten by a remote change, and neither is one edited while the pull was running.
 - Remote records with a blank name or no id are skipped, not imported.

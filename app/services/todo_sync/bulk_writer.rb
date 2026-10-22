@@ -8,21 +8,24 @@ module TodoSync
   module BulkWriter
     BATCH_SIZE = 500
 
+    # Success forgets previous failures (same as Syncable::SYNC_OK).
+    RESET = "sync_attempts = 0, next_sync_at = NULL, sync_error = NULL"
+
     MODES = {
       # Only advance the synced version (the remote already has these values).
       synced: {
-        set: "remote_updated_at = v.remote_updated_at, synced_version = v.version",
+        set: "remote_updated_at = v.remote_updated_at, synced_version = v.version, #{RESET}",
         guard: "todo_items.synced_version < v.version"
       },
       # Store the remote id of an item that was never linked.
       link: {
-        set: "external_id = v.external_id, remote_updated_at = v.remote_updated_at, synced_version = v.version",
+        set: "external_id = v.external_id, remote_updated_at = v.remote_updated_at, synced_version = v.version, #{RESET}",
         guard: "todo_items.external_id IS NULL AND todo_items.synced_version < v.version"
       },
       # Point an item to a new remote id after its list was recreated remotely.
       relink: {
         set: "external_id = v.external_id, remote_updated_at = v.remote_updated_at, " \
-             "synced_version = MAX(todo_items.synced_version, v.version)",
+             "synced_version = MAX(todo_items.synced_version, v.version), #{RESET}",
         guard: "1 = 1"
       },
       # Point an item to another remote id without saying anything about its versions.

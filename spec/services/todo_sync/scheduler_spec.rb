@@ -102,18 +102,18 @@ RSpec.describe TodoSync::Scheduler, :todo_sync do
   end
 
   describe '.retry_delay' do
-    it 'grows with consecutive aborted runs and is capped' do
-      expect(described_class.retry_delay).to eq(30.seconds)
+    it 'grows with consecutive aborted runs, with jitter, and is capped' do
+      expect(described_class.retry_delay).to be_between(15.seconds, 30.seconds)
 
       SyncRun.create!(status: 'aborted')
-      expect(described_class.retry_delay).to eq(30.seconds)
+      expect(described_class.retry_delay).to be_between(15.seconds, 30.seconds)
       SyncRun.create!(status: 'failed')
-      expect(described_class.retry_delay).to eq(60.seconds)
+      expect(described_class.retry_delay).to be_between(30.seconds, 60.seconds)
       8.times { SyncRun.create!(status: 'aborted') }
-      expect(described_class.retry_delay).to eq(15.minutes)
+      expect(described_class.retry_delay).to be_between(7.5.minutes, 15.minutes)
 
       SyncRun.create!(status: 'succeeded')
-      expect(described_class.retry_delay).to eq(30.seconds)
+      expect(described_class.retry_delay).to be_between(15.seconds, 30.seconds)
     end
   end
 end

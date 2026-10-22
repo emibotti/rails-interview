@@ -32,11 +32,10 @@ module TodoSync
       SyncState.where(id: SyncState::SINGLETON_ID).update_all(scheduled_at: nil)
     end
 
-    # Exponential delay after consecutive aborted or failed runs.
-    # TODO: replace with TodoSync::Backoff (exponential with jitter) in step 10.
+    # Backoff with jitter after consecutive aborted or failed runs.
     def retry_delay
       failures = SyncRun.order(id: :desc).limit(10).pluck(:status).take_while { |status| %w[aborted failed].include?(status) }.size
-      [30.seconds * (2**[failures - 1, 0].max), MAX_RETRY_DELAY].min
+      Backoff.delay([failures, 1].max, max: MAX_RETRY_DELAY)
     end
   end
 end

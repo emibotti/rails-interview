@@ -33,7 +33,7 @@ module TodoSync
     private
 
     def push_lists
-      TodoList.dirty.linked.select(:id, :name, :external_id, :local_version).find_each do |list|
+      TodoList.dirty.linked.ready_to_sync.select(:id, :name, :external_id, :local_version).find_each do |list|
         remote = @snapshot.lists_by_external_id[list.external_id]
         # Missing from the snapshot: deleted remotely. The Puller deals with it (step 6).
         next tick if remote.nil?
@@ -70,7 +70,7 @@ module TodoSync
     end
 
     def dirty_items
-      TodoItem.dirty.linked.joins(:todo_list).where.not(todo_lists: { external_id: nil }).select(
+      TodoItem.dirty.linked.ready_to_sync.joins(:todo_list).where.not(todo_lists: { external_id: nil }).select(
         "todo_items.id", "todo_items.name", "todo_items.completed", "todo_items.external_id",
         "todo_items.local_version", "todo_lists.external_id AS list_external_id"
       )
@@ -97,15 +97,13 @@ module TodoSync
       @run.increment_stat(:remote_calls)
       deleted_remotely(record, kind, e)
     rescue ExternalTodo::Client::Error => e
-      # TODO: per-record backoff and dead letters instead of just counting the failure (step 10).
       @run.increment_stat(:remote_calls)
-      @run.increment_stat(:failures)
-      Rails.logger.error("[TodoSync] PATCH #{kind} #{record.id} failed: #{e.message}")
+      Failures.record(record.class, record.id, e, run: @run)
     end
 
     def mark_synced(model, record, remote_updated_at)
       model.where(id: record.id).where("synced_version < ?", record.local_version)
-           .update_all(synced_version: record.local_version, remote_updated_at: remote_updated_at)
+           .update_all(synced_version: record.local_version, remote_updated_at: remote_updated_at, **Syncable::SYNC_OK)
     end
 
     def flush_noops(rows)

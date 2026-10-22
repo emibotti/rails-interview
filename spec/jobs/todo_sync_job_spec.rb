@@ -34,7 +34,7 @@ RSpec.describe TodoSyncJob, :todo_sync do
     fake_api.fail_next(:get, %r{/todolists}, status: 500, times: 10)
 
     expect { described_class.perform_now('spec') }
-      .to have_enqueued_job(described_class).with('retry_after_aborted').at(be_within(5.seconds).of(30.seconds.from_now))
+      .to have_enqueued_job(described_class).with('retry_after_aborted').at(be_within(20.seconds).of(23.seconds.from_now))
     expect(SyncRun.last.status).to eq('aborted')
   end
 

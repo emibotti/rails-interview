@@ -1,6 +1,5 @@
 module TodoSync
   # Runs one sync cycle under the global lock and records it in a SyncRun.
-  # TODO: add the circuit breaker (step 10) and the entry points (job, scheduler, rake tasks: step 9).
   class Runner
     def self.call(trigger:, client: ExternalTodo::Client.build)
       new(trigger: trigger, client: client).call
@@ -25,24 +24,29 @@ module TodoSync
     private
 
     def execute(run)
-      snapshot = Snapshot.new(@client.list_todo_lists)
+      client = GuardedClient.new(@client, threshold: Rails.configuration.x.todo_sync.circuit_breaker_threshold)
+      snapshot = Snapshot.new(client.list_todo_lists)
       run.increment_stat(:remote_calls)
 
       deletions_allowed = DeletionGuard.allow?(snapshot)
 
       Linker.call(snapshot, run)
       Puller.call(snapshot, run, deletions_allowed: deletions_allowed)
-      TombstonePusher.call(snapshot, run, client: @client)
-      CreatePusher.call(snapshot, run, client: @client)
-      ItemCreation.call(snapshot, run, client: @client)
+      TombstonePusher.call(snapshot, run, client: client)
+      CreatePusher.call(snapshot, run, client: client)
+      ItemCreation.call(snapshot, run, client: client)
       # A recreated list leaves a tombstone for the old one: send that DELETE in this same cycle.
-      TombstonePusher.call(snapshot, run, client: @client) if run.stats["lists_recreated_remote"]
-      UpdatePusher.call(snapshot, run, client: @client)
+      TombstonePusher.call(snapshot, run, client: client) if run.stats["lists_recreated_remote"]
+      UpdatePusher.call(snapshot, run, client: client)
 
       status = deletions_allowed ? :succeeded : :aborted_deletions
       run.finish!(status)
       SyncState.where(id: SyncState::SINGLETON_ID).update_all(last_succeeded_at: Time.current) if status == :succeeded
       Rails.logger.info("[TodoSync] run #{run.id} #{status}: #{run.stats}")
+    rescue GuardedClient::CircuitOpenError => e
+      # The API looks down: stop instead of trying every remaining record. The job reschedules with backoff.
+      Rails.logger.error("[TodoSync] run #{run.id} aborted: #{e.message}")
+      run.finish!(:aborted, error: e.message)
     rescue ExternalTodo::Client::Error => e
       # Without a fresh snapshot nothing else is safe to do: abort the cycle.
       Rails.logger.error("[TodoSync] run #{run.id} aborted: #{e.message}")

@@ -29,7 +29,7 @@ module TodoSync
 
     # Linked lists that have items waiting to be created remotely.
     def lists_with_unlinked_items
-      list_ids = TodoItem.unlinked.where(todo_list_id: TodoList.linked.select(:id)).distinct.pluck(:todo_list_id)
+      list_ids = TodoItem.unlinked.ready_to_sync.where(todo_list_id: TodoList.linked.ready_to_sync.select(:id)).distinct.pluck(:todo_list_id)
       TodoList.where(id: list_ids).select(:id, :name, :external_id, :local_version, :remote_updated_at).order(:id)
     end
 

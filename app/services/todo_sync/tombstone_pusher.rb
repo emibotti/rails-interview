@@ -6,10 +6,6 @@ module TodoSync
   # - A tombstone whose record is no longer in the snapshot needs no call either.
   # - 204 and 404 both mean "gone": the tombstone is dropped.
   class TombstonePusher
-    # TODO: replace with TodoSync::Backoff (exponential with jitter and a maximum number of attempts) in step 10.
-    RETRY_BASE = 30.seconds
-    RETRY_MAX = 1.hour
-
     def self.call(snapshot, run, client:)
       new(snapshot, run, client).call
     end
@@ -21,7 +17,9 @@ module TodoSync
     end
 
     def call
-      due = SyncTombstone.where("next_attempt_at IS NULL OR next_attempt_at <= ?", Time.current).order(:id).to_a
+      # Dead tombstones (too many attempts, or a 4xx) are kept and listed by todo_sync:failed, but not retried.
+      due = SyncTombstone.where("next_attempt_at IS NULL OR next_attempt_at <= ?", Time.current)
+                         .where("attempts < ?", Backoff.max_attempts).order(:id).to_a
       list_ids = due.select { |t| t.record_type == "TodoList" }.to_set(&:external_id)
 
       due.each do |tombstone|
@@ -64,12 +62,7 @@ module TodoSync
       tombstone.destroy!
     rescue ExternalTodo::Client::Error => e
       @run.increment_stat(:remote_calls)
-      @run.increment_stat(:failures)
-      attempts = tombstone.attempts + 1
-      # TODO: ClientError (4xx) should go straight to dead letter instead of retrying forever (step 10).
-      tombstone.update!(attempts: attempts, last_error: e.message.truncate(500),
-                        next_attempt_at: Time.current + [RETRY_BASE * (2**(attempts - 1)), RETRY_MAX].min)
-      Rails.logger.error("[TodoSync] DELETE #{tombstone.record_type} #{tombstone.external_id} failed (attempt #{attempts}): #{e.message}")
+      Failures.record_tombstone(tombstone, e, run: @run)
     end
 
     def drop(tombstone, stat)

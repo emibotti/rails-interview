@@ -15,7 +15,7 @@ module TodoSync
     end
 
     def call
-      TodoList.unlinked.select(:id, :name, :local_version).find_each do |list|
+      TodoList.unlinked.ready_to_sync.select(:id, :name, :local_version).find_each do |list|
         push(list)
         SyncState.heartbeat!
         Thread.pass
@@ -43,11 +43,10 @@ module TodoSync
       @run.increment_stat(:remote_calls)
       @run.increment_stat(:create_timeouts)
       Rails.logger.warn("[TodoSync] POST list #{list.id} timed out; it will be linked by source_id if it was created (#{e.message})")
+      Failures.record(TodoList, list.id, e, run: @run)
     rescue ExternalTodo::Client::Error => e
-      # TODO: per-record backoff and dead letters instead of just counting the failure (step 10).
       @run.increment_stat(:remote_calls)
-      @run.increment_stat(:failures)
-      Rails.logger.error("[TodoSync] POST list #{list.id} failed: #{e.message}")
+      Failures.record(TodoList, list.id, e, run: @run)
     end
 
     # Stores the remote ids in one transaction. synced_version is set to the
@@ -57,7 +56,7 @@ module TodoSync
 
       TodoList.transaction do
         TodoList.where(id: list.id, external_id: nil).where("synced_version < ?", list.local_version)
-                .update_all(external_id: remote.external_id, remote_updated_at: remote.updated_at, synced_version: list.local_version)
+                .update_all(external_id: remote.external_id, remote_updated_at: remote.updated_at, synced_version: list.local_version, **Syncable::SYNC_OK)
         BulkWriter.mark_items_synced(
           pairs.map { |item, remote_item| [item.id, remote_item.external_id, remote_item.updated_at, item.local_version] },
           mode: :link

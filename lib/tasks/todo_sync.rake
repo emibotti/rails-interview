@@ -11,6 +11,20 @@ namespace :todo_sync do
     end
   end
 
+  desc 'List the records that gave up syncing (dead letters) with their error'
+  task failed: :environment do
+    dead = TodoSync::DeadLetters.all
+    puts "#{dead.size} dead letters"
+    dead.each { |type, id, error| puts "  #{type} #{id}: #{error}" }
+  end
+
+  desc 'Put every dead letter back in play and ask for a sync'
+  task retry_failed: :environment do
+    count = TodoSync::DeadLetters.retry_all!
+    TodoSync::Scheduler.request!(reason: :retry_failed) if count.positive?
+    puts "#{count} dead letters reset"
+  end
+
   desc 'Show the last sync runs and what is pending (dirty records, tombstones, errors)'
   task status: :environment do
     state = SyncState.instance
@@ -34,6 +48,9 @@ namespace :todo_sync do
     end
 
     failed = [TodoList, TodoItem].flat_map { |model| model.where.not(sync_error: nil).limit(10).map { |record| [model.name, record] } }
+    puts "  retrying:   #{TodoList.where('sync_attempts > 0').count - TodoList.dead_letters.count} lists, " \
+         "#{TodoItem.where('sync_attempts > 0').count - TodoItem.dead_letters.count} items"
+    puts "  dead:       #{TodoSync::DeadLetters.all.size} (bin/rails todo_sync:failed, todo_sync:retry_failed)"
     puts "  with errors: #{TodoList.where.not(sync_error: nil).count} lists, #{TodoItem.where.not(sync_error: nil).count} items"
     failed.each { |type, record| puts "    #{type} #{record.id}: #{record.sync_error.truncate(120)}" }
   end

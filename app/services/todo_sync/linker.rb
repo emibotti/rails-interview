@@ -115,7 +115,7 @@ module TodoSync
     # row if it was deleted, linked meanwhile or belongs to another list.
     def link(model, local_id, remote, **conditions)
       linked = model.where(id: local_id, external_id: nil, **conditions)
-                    .update_all(external_id: remote.external_id, remote_updated_at: remote.updated_at)
+                    .update_all(external_id: remote.external_id, remote_updated_at: remote.updated_at, **Syncable::SYNC_OK)
       Rails.logger.info("[TodoSync] linked #{model.name} #{local_id} -> #{remote.external_id}") if linked == 1
       linked
     end
