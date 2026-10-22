@@ -136,7 +136,7 @@ RSpec.describe TodoSync::Runner do
       expect(list.remote_updated_at).to eq(Time.utc(2026, 2, 1))
     end
 
-    it 'does not overwrite a record that is dirty locally' do
+    it 'keeps a dirty local record that is newer than the remote change' do
       # Only the pull is under test here; what the push does with the conflict is step 7.
       allow(TodoSync::UpdatePusher).to receive(:call)
       list.update!(name: 'Local edit')

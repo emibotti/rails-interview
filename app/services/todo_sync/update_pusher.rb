@@ -6,6 +6,9 @@ module TodoSync
   # the fields that differ are sent. This is what keeps a mark all of N items,
   # M of them already completed remotely, down to N - M requests.
   #
+  # Conflicts were already decided by the Puller: a record still dirty here either changed only locally or
+  # won the last-write-wins comparison, so its values are the ones to send.
+  #
   # synced_version is set to the version that was read before the call, never the
   # current one, so an edit made during the PATCH leaves the record dirty.
   class UpdatePusher
@@ -25,7 +28,6 @@ module TodoSync
     def call
       push_lists
       push_items
-      # TODO: when both sides changed, compare updated_at instead of always pushing the local value (step 7).
     end
 
     private

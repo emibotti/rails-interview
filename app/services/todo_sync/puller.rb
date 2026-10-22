@@ -8,10 +8,12 @@ module TodoSync
   # Records linked locally that are missing from the snapshot were deleted remotely and are deleted
   # here too (delete wins), but only when `deletions_allowed` (see DeletionGuard). Remote records with
   # a pending tombstone were deleted locally and are not brought back.
-  # TODO: conflict resolution (step 7): last write wins when both sides changed; delete wins over edits.
+  # Conflicts (both sides changed with different values) are decided at record level: the most recent
+  # updated_at wins, and a tie goes to the remote (deterministic). When the remote wins it is applied here;
+  # when the local wins the record stays dirty and the UpdatePusher sends it. A delete beats an edit on either side.
   class Puller
     BATCH_SIZE = 1000
-    LIST_COLUMNS = %i[id name external_id local_version synced_version remote_updated_at].freeze
+    LIST_COLUMNS = %i[id name external_id local_version synced_version remote_updated_at updated_at].freeze
     ITEM_COLUMNS = (LIST_COLUMNS + %i[completed]).freeze
 
     def self.call(snapshot, run, deletions_allowed: true)
@@ -147,11 +149,14 @@ module TodoSync
       return model.where(id: local.id).update_all(remote_updated_at: remote_updated_at) if values.all? { |k, v| local[k] == v }
 
       if local.local_version > local.synced_version
-        # Both sides changed and the values differ.
-        # TODO: resolve the conflict (step 7) instead of leaving the local value in place.
+        # Both sides changed and the values differ: last write wins.
         @run.increment_stat(:conflicts)
-        Rails.logger.warn("[TodoSync] #{kind} #{local.id} changed on both sides; left untouched for now")
-        return
+        unless remote_wins?(local, remote)
+          Rails.logger.warn("[TodoSync] conflict on #{kind} #{local.id}: local is newer (#{local.updated_at.utc.iso8601(3)} > " \
+                            "#{remote.updated_at&.utc&.iso8601(3)}); keeping it, the push will overwrite the remote")
+          return
+        end
+        Rails.logger.warn("[TodoSync] conflict on #{kind} #{local.id}: remote is newer or equal; discarding the local change (v#{local.local_version})")
       end
 
       # Conditional on local_version: if the user edited the record after we
@@ -210,6 +215,13 @@ module TodoSync
       @run.increment_stat(:pending_link)
       Rails.logger.info("[TodoSync] remote #{kind} #{remote.external_id} is ours (#{remote.source_id}); waiting to be linked")
       nil
+    end
+
+    # The remote wins when it is at least as recent as the local edit (a tie goes to the remote).
+    # Compared to the millisecond, the precision of the wire format. Without a remote updated_at there is
+    # nothing to compare, so the local change is kept rather than silently discarded.
+    def remote_wins?(local, remote)
+      remote.updated_at.present? && remote.updated_at.to_f.round(3) >= local.updated_at.to_f.round(3)
     end
 
     def same_time?(a, b)

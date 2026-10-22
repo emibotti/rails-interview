@@ -8,7 +8,7 @@ Sections marked _(planned)_ describe decisions already taken whose code is not w
 
 - Two-way, **state-based** sync of `TodoList` and `TodoItem` with the External Todo API.
 - One idempotent sync cycle: snapshot (one `GET`) → link by `source_id` → apply remote changes →
-  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull, push of creates, push of updates and deletes in both directions. It is triggered by a debounced job after
+  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull, push of creates, push of updates, deletes in both directions and conflict resolution. It is triggered by a debounced job after
   local changes and by a periodic reconciliation (rake task + cron) as a safety net.
 - Components:
   - `ExternalTodo::*` (`app/services/external_todo/`): HTTP client, mapper and value objects. The only code that knows the external wire format.
@@ -92,10 +92,10 @@ The cycle starts with one `GET /todolists` and only then writes anything. The pu
 - **Detects remote changes** by comparing the snapshot's `updated_at` with the stored `remote_updated_at` (to the millisecond,
   the precision of the wire format), not by comparing every field. A record whose timestamp did not move costs no write at all,
   so running the pull twice writes nothing (a spec counts the `INSERT`/`UPDATE` statements).
-- **Applies** a remote change only if the record is clean locally. It uses a conditional `UPDATE ... WHERE local_version = <the one read>`:
+- **Applies** a remote change if the record is clean locally, or if it wins a conflict (see "Conflict resolution"). It uses a conditional `UPDATE ... WHERE local_version = <the one read>`:
   if the user edited the record between our read and our write, zero rows match and the next cycle re-evaluates. No lock is held.
-- **Never overwrites a dirty record.** If both sides changed and the values differ, it is counted in `stats["conflicts"]`, logged,
-  and `remote_updated_at` is left as it was so the conflict stays detectable. Resolving it is step 7.
+- **Never overwrites a dirty record unless the remote is newer.** Otherwise the record is left as it is, with `remote_updated_at` untouched,
+  and the push sends it.
 - **Skips records created by us** (parseable `source_id`) that are not linked yet: the linker (step 4) binds them to their local record,
   which is how a `POST` that timed out gets recognised without creating duplicates.
 - **Skips remote records with a blank name or no id**, with a `warn` and `stats["skipped_invalid"]`. `insert_all` bypasses validations and
@@ -152,7 +152,6 @@ Dirty linked lists and items (items only if their list is linked) are **compared
   logs the local version that was dropped.
 - A `422` or a persistent `5xx` is counted in `stats["failures"]` and the record stays dirty; the other records go on.
 - The loop refreshes the lock heartbeat and calls `Thread.pass` every 100 records.
-- Until conflict resolution exists (step 7) a record changed on both sides is simply overwritten with the local value.
 - Not done: bounded concurrency for the `PATCH`es. It is the main lever for huge mark alls, but SQLite's single writer and the GVL make it
   a measured optimisation rather than a default, so it is listed as future work.
 
@@ -175,6 +174,23 @@ the snapshot is empty but we have linked lists, or when more than 50 % of at lea
 (`config.x.todo_sync.guard_*`). The run ends as `aborted_deletions` and an `error` is logged; pushes and imports still happen.
 Known cost: if the *only* linked list is deleted remotely it is never deleted locally (the snapshot looks empty); the same happens when
 a large share of lists is legitimately deleted at once. Both need a human (or a lower threshold). The guard looks at lists only, not at items.
+
+### Conflict resolution
+A conflict exists only when **both sides changed** since the last sync (`local_version > synced_version` and the snapshot's `updated_at` differs from
+`remote_updated_at`) **and the values differ**. Changing both sides to the same value is not a conflict and costs no request.
+
+- **Last write wins at record level**, comparing the local `updated_at` with the remote one to the millisecond. A tie goes to the remote
+  because it is deterministic. If the remote wins it is applied by the pull (conditional on `local_version`, so an edit that arrives
+  meanwhile is not lost) and the local change is discarded with a `warn`. If the local wins the record stays dirty and the push overwrites the remote.
+  The pull decides and the push does not look at timestamps, so each side has one place to read.
+- **A delete beats an edit, in both directions** (see "Deletes in both directions"); the log says what was dropped.
+- If the remote has no `updated_at` there is nothing to compare, so the local change is kept instead of being discarded blindly.
+- Every conflict is counted in `stats["conflicts"]` and logged, which is the audit trail.
+- Why not something richer: a fixed source of truth loses edits, CRDTs are overkill for a todo list, and a field-level merge needs the last synced
+  values (future work, see above). The cost of record-level LWW is that editing *different* fields on both sides keeps only the newer record
+  as a whole (e.g. a remote `completed` is lost if the local `name` edit is newer).
+- Risk: the two clocks are not the same clock. A remote server running behind ours loses every conflict. Nothing in the API (no ETag or version)
+  allows a safer rule.
 
 ### Locks with heartbeat
 `SyncState` is a single-row table with `scheduled_at` (debounce mark) and `lock_heartbeat_at`. The lock is taken with a
@@ -228,6 +244,7 @@ Handled so far (each has a spec):
 - `DELETE` answered 404: counted as success. Failing `DELETE`: tombstone kept with backoff, and the pull does not bring the record back.
 - Record deleted remotely: deleted locally without a tombstone; a pending local edit is logged and dropped (delete wins).
 - Empty or mostly missing snapshot: nothing is deleted locally and the run is `aborted_deletions`.
+- Both sides changed: the newest wins, a tie goes to the remote, equal values are not a conflict, and the result is stable on the next cycle.
 - Running the pull twice writes nothing; a remote change to a clean record is applied without bumping `local_version`.
 - A record dirty locally is not overwritten by a remote change, and neither is one edited while the pull was running.
 - Remote records with a blank name or no id are skipped, not imported.
