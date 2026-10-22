@@ -6,8 +6,7 @@ namespace :todo_sync do
     if run == :busy
       puts 'Another sync is running'
     else
-      puts "Run ##{run.id} #{run.status}: #{run.stats}"
-      puts "Error: #{run.error}" if run.error
+      puts run.summary
     end
   end
 

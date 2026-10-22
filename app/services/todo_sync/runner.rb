@@ -25,6 +25,7 @@ module TodoSync
 
     def execute(run)
       client = GuardedClient.new(@client, threshold: Rails.configuration.x.todo_sync.circuit_breaker_threshold)
+      attempts_before = client.attempts_total
       snapshot = Snapshot.new(client.list_todo_lists)
       run.increment_stat(:remote_calls)
 
@@ -40,9 +41,11 @@ module TodoSync
       UpdatePusher.call(snapshot, run, client: client)
 
       status = deletions_allowed ? :succeeded : :aborted_deletions
+      # Every HTTP attempt of this run, retries included (remote_calls counts logical calls).
+      run.stats = run.stats.merge("http_requests" => client.attempts_total - attempts_before)
       run.finish!(status)
       SyncState.where(id: SyncState::SINGLETON_ID).update_all(last_succeeded_at: Time.current) if status == :succeeded
-      Rails.logger.info("[TodoSync] run #{run.id} #{status}: #{run.stats}")
+      Rails.logger.info("[TodoSync] #{run.summary}")
     rescue GuardedClient::CircuitOpenError => e
       # The API looks down: stop instead of trying every remaining record. The job reschedules with backoff.
       Rails.logger.error("[TodoSync] run #{run.id} aborted: #{e.message}")

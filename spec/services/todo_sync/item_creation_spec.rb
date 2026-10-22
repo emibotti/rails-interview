@@ -58,7 +58,7 @@ RSpec.describe TodoSync::ItemCreation do
       run = sync
 
       expect(fake_api.requests.size - before_count).to eq(1)
-      expect(run.stats).to eq('remote_calls' => 1)
+      expect(run.stats).to eq('remote_calls' => 1, 'http_requests' => 1)
     end
 
     it 'keeps the tombstone when the DELETE of the old list fails, and finishes next cycle' do

@@ -52,6 +52,6 @@ RSpec.describe 'Sync convergence' do
     expect(SyncTombstone.count).to eq(0)
     expect(local_state.map(&:first)).to include('Edited locally', 'New local list', 'Remote only', 'Keep')
     expect(local_state.map(&:first)).not_to include('Delete me locally', 'Delete me remotely')
-    expect(sync.stats).to eq('remote_calls' => 1)
+    expect(sync.stats).to eq('remote_calls' => 1, 'http_requests' => 1)
   end
 end

@@ -41,7 +41,6 @@ module TodoSync
 
       def recreate(list)
         items = TodoItem.where(todo_list_id: list.id).order(:id).select(:id, :name, :completed, :local_version).to_a
-        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
         remote = @client.create_todo_list(
           name: list.name,
@@ -50,9 +49,8 @@ module TodoSync
         )
         @run.increment_stat(:remote_calls)
         save(list, items, remote)
-
-        ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round
-        Rails.logger.info("[TodoSync] recreated list #{list.id}: #{list.external_id} -> #{remote.external_id} (#{items.size} items, #{ms}ms)")
+        OperationLog.success(@client, "POST list (recreate)", local: list.id, remote: remote.external_id,
+                                                              detail: "(#{items.size} items, replaces #{list.external_id})")
       rescue ExternalTodo::Client::TimeoutError => e
         @run.increment_stat(:remote_calls)
         @run.increment_stat(:create_timeouts)

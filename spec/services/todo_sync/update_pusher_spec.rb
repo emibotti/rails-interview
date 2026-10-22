@@ -26,7 +26,7 @@ RSpec.describe TodoSync::Runner do
     run = sync
 
     expect(fake_api.requests.size - before_count).to eq(1)
-    expect(run.stats).to eq('remote_calls' => 1)
+    expect(run.stats).to eq('remote_calls' => 1, 'http_requests' => 1)
   end
 
   describe 'lists' do

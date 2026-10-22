@@ -21,7 +21,14 @@ module ExternalTodo
       private
 
       def default_message
-        "#{http_method.to_s.upcase} #{path} failed with #{status || 'no response'}: #{body.to_s.truncate(500)}"
+        "#{http_method.to_s.upcase} #{path} failed with #{status || 'no response'}: #{printable(body).truncate(500)}"
+      end
+
+      # Parsed JSON bodies print as JSON, not as a Ruby inspect string.
+      def printable(body)
+        body.is_a?(String) ? body : JSON.generate(body)
+      rescue JSON::GeneratorError
+        body.to_s
       end
     end
 
@@ -36,8 +43,13 @@ module ExternalTodo
     # Invalid JSON or an unexpected shape.
     class InvalidResponseError < Error; end
 
+    # What the sync logs about the last call: which request, how it ended and how many attempts it took.
+    Request = Struct.new(:http_method, :path, :status, :duration_ms, :attempts, keyword_init: true)
+
     RETRY_STATUSES = [429, 500, 502, 503, 504].freeze
     ITEM_ATTRS = %i[name completed].freeze
+
+    attr_reader :last_request, :attempts_total
 
     def self.build
       config = Rails.configuration.x.external_todo
@@ -51,6 +63,7 @@ module ExternalTodo
 
     def initialize(base_url:, open_timeout: 2, timeout: 10, retry_options: {}, logger: Rails.logger)
       @logger = logger
+      @attempts_total = 0
       @connection = build_connection(base_url, open_timeout, timeout, retry_options)
     end
 
@@ -109,15 +122,20 @@ module ExternalTodo
 
       Faraday.new(url: base_url, request: { open_timeout: open_timeout, timeout: timeout }) do |f|
         f.request :json
-        f.request :retry, retry_options
+        # The parser sits outside the retry middleware: retries look at the raw status, so an error page that is
+        # not JSON (an HTML 502 from a proxy) is still retried, and only the final response is parsed.
         f.response :json, content_type: /\bjson$/, parser_options: { symbolize_names: false }
+        f.request :retry, retry_options
         f.adapter :net_http
       end
     end
 
     def request(http_method, path, body = nil)
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      @current_attempts = 1
+      status = nil
       response = @connection.run_request(http_method, path.delete_prefix("/"), body, nil)
+      status = response.status
       log_response(http_method, path, response.status, started)
       handle_response(http_method, path, response)
     rescue Faraday::TimeoutError => e
@@ -127,21 +145,39 @@ module ExternalTodo
       log_failure(http_method, path, e)
       raise RetryableError.new("#{http_method.to_s.upcase} #{path} connection failed: #{e.message}", http_method: http_method, path: path)
     rescue Faraday::ParsingError => e
+      status = e.response_status
       log_failure(http_method, path, e)
+      # An error status whose body is not JSON (an HTML 502 page, say) must still be reported by its status.
+      raise error_for(http_method, path, status, e.response.body) if status && !status.between?(200, 299)
+
       raise InvalidResponseError.new("#{http_method.to_s.upcase} #{path} returned invalid JSON: #{e.message}", http_method: http_method, path: path)
+    ensure
+      finish_request(http_method, path, status, started)
+    end
+
+    def finish_request(http_method, path, status, started)
+      @attempts_total += @current_attempts
+      @last_request = Request.new(
+        http_method: http_method.to_s.upcase, path: path, status: status, attempts: @current_attempts,
+        duration_ms: ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round
+      )
     end
 
     def handle_response(http_method, path, response)
       status = response.status
       return response.body if status.between?(200, 299)
 
+      raise error_for(http_method, path, status, response.body)
+    end
+
+    def error_for(http_method, path, status, body)
       error_class =
         if status == 404 then NotFoundError
         elsif status == 408 || RETRY_STATUSES.include?(status) || status >= 500 then RetryableError
         elsif status >= 400 then ClientError
         else InvalidResponseError
         end
-      raise error_class.new(status: status, body: response.body, http_method: http_method, path: path)
+      error_class.new(status: status, body: body, http_method: http_method, path: path)
     end
 
     def expect_hash!(http_method, path, body)
@@ -175,6 +211,7 @@ module ExternalTodo
     end
 
     def log_retry(env:, options:, retry_count:, exception:, will_retry_in:)
+      @current_attempts += 1
       reason = exception ? exception.class.name : "status #{env.status}"
       @logger.warn(
         "[ExternalTodo] retrying #{env.method.to_s.upcase} #{env.url.path} (#{reason}), " \

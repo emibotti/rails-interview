@@ -33,7 +33,7 @@ module TodoSync
         TodoItem.where(id: item.id, external_id: nil).where("synced_version < ?", item.local_version)
                 .update_all(external_id: remote.external_id, remote_updated_at: remote.updated_at, synced_version: item.local_version, **Syncable::SYNC_OK)
         @run.increment_stat(:items_created_remote)
-        Rails.logger.info("[TodoSync] POST item #{item.id} in list #{list.id} -> #{remote.external_id}")
+        OperationLog.success(@client, "POST item", local: item.id, remote: remote.external_id, detail: "(list #{list.id})")
       rescue ExternalTodo::Client::TimeoutError => e
         @run.increment_stat(:remote_calls)
         @run.increment_stat(:create_timeouts)

@@ -44,6 +44,24 @@ RSpec.describe ExternalTodo::Client do
       expect(requests_to("GET").size).to eq(3) # 1 + max 2 retries
     end
 
+    it "retries an error page that is not JSON and reports its status" do
+      stub = stub_request(:get, "http://external.test/todolists").to_return(
+        status: 502, body: "<html>Bad Gateway</html>", headers: { "Content-Type" => "application/json" }
+      )
+
+      expect { client.list_todo_lists }.to raise_error(ExternalTodo::Client::RetryableError, /GET \/todolists failed with 502: <html>Bad Gateway/)
+      expect(stub).to have_been_requested.times(3)
+    end
+
+    it "reports a 4xx with a non JSON body by its status, without retrying" do
+      stub = stub_request(:get, "http://external.test/todolists").to_return(
+        status: 403, body: "Forbidden", headers: { "Content-Type" => "application/json" }
+      )
+
+      expect { client.list_todo_lists }.to raise_error(ExternalTodo::Client::ClientError, /failed with 403: Forbidden/)
+      expect(stub).to have_been_requested.once
+    end
+
     it "retries a timeout and succeeds" do
       fake_api.timeout_next(:get, %r{/todolists})
 

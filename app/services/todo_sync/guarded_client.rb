@@ -28,6 +28,15 @@ module TodoSync
       end
     end
 
+    # Details of the last call (status, attempts, duration), for the operation log lines.
+    def last_request
+      @client.last_request
+    end
+
+    def attempts_total
+      @client.attempts_total
+    end
+
     private
 
     def call(name, args, kwargs)

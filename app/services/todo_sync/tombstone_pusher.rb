@@ -45,7 +45,6 @@ module TodoSync
     end
 
     def delete_remote(tombstone)
-      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       begin
         if tombstone.record_type == "TodoList"
           @client.delete_todo_list(tombstone.external_id)
@@ -57,8 +56,7 @@ module TodoSync
       end
       @run.increment_stat(:remote_calls)
       @run.increment_stat(tombstone.record_type == "TodoList" ? :lists_deleted_remote : :items_deleted_remote)
-      ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round
-      Rails.logger.info("[TodoSync] DELETE #{tombstone.record_type} #{tombstone.external_id} (#{ms}ms)")
+      OperationLog.success(@client, "DELETE #{tombstone.record_type.sub('Todo', '').downcase}", local: "-", remote: tombstone.external_id)
       tombstone.destroy!
     rescue ExternalTodo::Client::Error => e
       @run.increment_stat(:remote_calls)

@@ -85,14 +85,11 @@ module TodoSync
 
     # Runs the PATCH and records the result. A failure of one record never stops the others.
     def patch(record, kind)
-      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       remote = yield
       @run.increment_stat(:remote_calls)
       @run.increment_stat(:"#{kind}s_updated_remote")
       mark_synced(record.class, record, remote.updated_at)
-
-      ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round
-      Rails.logger.info("[TodoSync] PATCH #{kind} #{record.id} -> #{record.external_id} (v#{record.local_version}, #{ms}ms)")
+      OperationLog.success(@client, "PATCH #{kind}", local: record.id, remote: record.external_id, detail: "(v#{record.local_version})")
     rescue ExternalTodo::Client::NotFoundError => e
       @run.increment_stat(:remote_calls)
       deleted_remotely(record, kind, e)

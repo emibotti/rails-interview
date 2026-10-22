@@ -8,12 +8,12 @@ Sections marked _(planned)_ describe decisions already taken whose code is not w
 
 - Two-way, **state-based** sync of `TodoList` and `TodoItem` with the External Todo API.
 - One idempotent sync cycle: snapshot (one `GET`) → link by `source_id` → apply remote changes →
-  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull, push of creates, push of updates, deletes in both directions, conflict resolution, item creation in existing lists, the triggers (job, debounce, rake) and per-record resilience. It is triggered by a debounced job after
+  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull, push of creates, push of updates, deletes in both directions, conflict resolution, item creation in existing lists, the triggers (job, debounce, rake), per-record resilience and observability. It is triggered by a debounced job after
   local changes and by a periodic reconciliation (rake task + cron) as a safety net.
 - Components:
   - `ExternalTodo::*` (`app/services/external_todo/`): HTTP client, mapper and value objects. The only code that knows the external wire format.
   - `Syncable` concern + `sync_*` tables: local change tracking.
-  - `TodoSync::*` (`app/services/todo_sync/`): the sync engine (`Runner`, `Snapshot`, `Linker`, `Puller`, `CreatePusher`, `UpdatePusher`, `TombstonePusher`, `ItemCreation::*`, `DeletionGuard`, `Scheduler`, `Backoff`, `Failures`, `GuardedClient`, `DeadLetters`, `BulkWriter`, plus `TodoSyncJob`).
+  - `TodoSync::*` (`app/services/todo_sync/`): the sync engine (`Runner`, `Snapshot`, `Linker`, `Puller`, `CreatePusher`, `UpdatePusher`, `TombstonePusher`, `ItemCreation::*`, `DeletionGuard`, `Scheduler`, `Backoff`, `Failures`, `GuardedClient`, `DeadLetters`, `OperationLog`, `BulkWriter`, plus `TodoSyncJob`).
   - `FakeExternalTodoApi` (`lib/`): in-memory fake of the external API, used by the specs and for manual runs.
 
 ## Key design decisions
@@ -280,6 +280,25 @@ Across cycles (the state lives in the database, so it survives restarts):
   are not dead letters and `retry_failed` leaves them alone.
 - Stale lock recovery: a cycle that dies (a Puma restart) leaves the lock with an old heartbeat; after 5 minutes the next cycle takes it.
 - One bad record never blocks the rest, but a dead letter that stays dirty keeps being skipped, so it can lag behind forever until someone looks at it.
+
+## Observability
+
+- **A row per run (`sync_runs`)**: trigger, status (`running`, `succeeded`, `failed`, `aborted`, `aborted_deletions`), start/finish, duration, the error and a
+  `stats` JSON. `SyncRun#summary` is the one-line form that the log and `todo_sync:run` print.
+- **Counters** (only the ones that happened appear): `remote_calls` (logical API calls) and `http_requests` (every HTTP attempt, retries included, so the two
+  differ when retries happened); `lists_/items_` + `created_/updated_/deleted_` + `local/remote`; `lists_linked`, `items_linked`, `lists_relinked`,
+  `lists_recreated_remote`, `duplicates_found`, `orphans`; `skipped_noop` (writes avoided by diffing against the snapshot), `skipped_tombstoned`,
+  `skipped_invalid`, `pending_link`; `conflicts`; `failures`, `dead_letters`, `create_timeouts`; `items_skipped_unsupported`.
+  A spec checks the exact counters of a full cycle, an update cycle and a retried call.
+- **Logs**: every line of a run is tagged `[todo_sync] [run=<id>]`. Each remote operation that went through leaves one line with the operation, the
+  local id, the remote id, the HTTP status, the number of attempts and the duration, e.g.
+  `PATCH item local=42 remote=9f3c... -> 200 (2 attempts, 83ms) (v3)`. The client also logs every request and every retry (`[ExternalTodo]`).
+  Failures are logged at `error` with the exception message, and decisions that lose or skip something (`delete wins`, conflicts, orphans, dead letters) at `warn`.
+- **Error messages** always say what failed: `PATCH /todolists/<id>/todoitems/<id> failed with 422: {"error":"..."}` (the body is printed as JSON and truncated to 500 characters).
+  An error response is reported by its **status** even when its body is not JSON (an HTML 502 page from a proxy); the parser sits outside the retry middleware so
+  such a response is also retried instead of failing as a parsing error.
+- **Where to look**: `bin/rails todo_sync:status` (last runs, lock, dirty/unlinked/dead records, tombstones), `todo_sync:failed` (dead letters with their error).
+  Metrics and alerting are future work.
 
 ## Performance
 

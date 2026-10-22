@@ -26,7 +26,6 @@ module TodoSync
 
     def push(list)
       items = TodoItem.where(todo_list_id: list.id).order(:id).select(:id, :name, :completed, :local_version).to_a
-      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
       remote = @client.create_todo_list(
         name: list.name,
@@ -35,9 +34,7 @@ module TodoSync
       )
       @run.increment_stat(:remote_calls)
       save_links(list, items, remote)
-
-      ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round
-      Rails.logger.info("[TodoSync] POST list #{list.id} -> #{remote.external_id} (#{items.size} items, #{ms}ms)")
+      OperationLog.success(@client, "POST list", local: list.id, remote: remote.external_id, detail: "(#{items.size} items)")
     rescue ExternalTodo::Client::TimeoutError => e
       # Ambiguous: don't re-POST in this cycle, the next snapshot tells.
       @run.increment_stat(:remote_calls)
