@@ -1,15 +1,16 @@
 # NOTES
 
-Design notes for the two-way sync between this Todo API and the External Todo API.
-This file grows with the implementation: each section describes what exists today.
-Sections marked _(planned)_ describe decisions already taken whose code is not written yet.
+Design notes for the two-way sync between this Todo API and the External Todo API: what it does, why it is built this way,
+the trade-offs, the assumptions and what would come next. How to run it is at the end (and in the README).
 
 ## High-level overview
 
 - Two-way, **state-based** sync of `TodoList` and `TodoItem` with the External Todo API.
-- One idempotent sync cycle: snapshot (one `GET`) → link by `source_id` → apply remote changes →
-  push tombstones → push creates → item-creation strategy → push updates. Implemented so far: snapshot, link, pull, push of creates, push of updates, deletes in both directions, conflict resolution, item creation in existing lists, the triggers (job, debounce, rake), per-record resilience and observability. It is triggered by a debounced job after
-  local changes and by a periodic reconciliation (rake task + cron) as a safety net.
+- One idempotent sync cycle: **snapshot** (one `GET`) → **link** by `source_id` → **pull** (apply remote changes, deletes and conflicts) →
+  **push** tombstones → creates → items created in existing lists → updates. Re-running it is always safe, so it can be triggered often
+  and recovers by itself from any partial failure.
+- It runs after local changes (a debounced job, 5 s) and periodically (`bin/rails todo_sync:run` from cron) as a safety net.
+- The local JSON API (routes, fields, status codes) is untouched: no sync column is exposed.
 - Components:
   - `ExternalTodo::*` (`app/services/external_todo/`): HTTP client, mapper and value objects. The only code that knows the external wire format.
   - `Syncable` concern + `sync_*` tables: local change tracking.
@@ -96,13 +97,13 @@ The cycle starts with one `GET /todolists` and only then writes anything. The pu
   if the user edited the record between our read and our write, zero rows match and the next cycle re-evaluates. No lock is held.
 - **Never overwrites a dirty record unless the remote is newer.** Otherwise the record is left as it is, with `remote_updated_at` untouched,
   and the push sends it.
-- **Skips records created by us** (parseable `source_id`) that are not linked yet: the linker (step 4) binds them to their local record,
+- **Skips records created by us** (parseable `source_id`) that are not linked yet: the Linker binds them to their local record,
   which is how a `POST` that timed out gets recognised without creating duplicates.
 - **Skips remote records with a blank name or no id**, with a `warn` and `stats["skipped_invalid"]`. `insert_all` bypasses validations and
   `name` is required locally; importing a placeholder would invent data, so skipping is the conservative choice.
 - Calls `Thread.pass` between lists, like the mark all job, because SQLite runs in-process and would otherwise starve Puma's request threads.
 
-Remote deletions are not handled yet (step 6).
+Remote deletions and conflicts are described below ("Deletes in both directions", "Conflict resolution").
 
 `Runner` takes the global lock, wraps the cycle in a `SyncRun` (status, stats, error) and tags the logs with `todo_sync` and `run=<id>`.
 If the snapshot cannot be fetched the run is `aborted` and nothing is written: pushing without a fresh snapshot risks duplicates and overwrites.
@@ -131,11 +132,11 @@ Each local list without `external_id` is sent with **all** its items in one `POS
 - The returned ids are matched to local rows by `source_id`. If the API does not echo `source_id`, it falls back to the order the items
   were sent in (with a `warn`), and if that is impossible the list is linked and the items are linked by the Linker next cycle.
 - Everything is saved in one transaction with `synced_version = <version sent>`, never the current one: an edit made while the POST
-  was in flight leaves the record dirty, and items created during the POST stay unlinked for the item-creation strategy (step 8).
+  was in flight leaves the record dirty, and items created during the POST stay unlinked for the item creation strategy.
 - Item links are written with `BulkWriter`: one `UPDATE ... FROM (VALUES ...)` per 500 items instead of one `UPDATE` per item, which
   matters for lists with 100k items (a CTE is needed because SQLite has no `AS v(columns)` alias for subqueries).
-- A `TimeoutError` is counted and the list is left for the next cycle (to be linked if it was created). A `4xx` or `5xx` is counted as a
-  failure and the cycle continues with the next list. Backoff and dead letters come in step 10.
+- A `TimeoutError` is counted and the list is left for the next cycle (to be linked if it was created). A `4xx` or `5xx` is recorded
+  against that list (backoff or dead letter, see "Resilience") and the cycle continues with the next list.
 - Trade-off: a list with a huge number of items is one huge request. The plan caps the lists we *recreate* (D9), not the first upload.
 
 ### Pushing updates (`TodoSync::UpdatePusher`)
@@ -147,10 +148,10 @@ Dirty linked lists and items (items only if their list is linked) are **compared
   completed remotely, cost exactly N - M requests (a spec checks it), since the API has no bulk operation.
 - After a successful `PATCH`, `synced_version` is set to the version read **before** the call, with `WHERE synced_version < version`,
   so an edit made during the request leaves the record dirty and the next cycle sends it (a spec edits the item inside the request).
-- A record missing from the snapshot is skipped (it was deleted remotely; the pull deals with it in step 6). A `404` on `PATCH` means it
+- A record missing from the snapshot is skipped (it was deleted remotely; the pull deals with it). A `404` on `PATCH` means it
   vanished after the snapshot: the delete wins (D5), the record is removed locally without callbacks (so no tombstone) and a `warn`
   logs the local version that was dropped.
-- A `422` or a persistent `5xx` is counted in `stats["failures"]` and the record stays dirty; the other records go on.
+- A failure is recorded against that record (backoff or dead letter, see "Resilience"); it stays dirty and the other records go on.
 - The loop refreshes the lock heartbeat and calls `Thread.pass` every 100 records.
 - Not done: bounded concurrency for the `PATCH`es. It is the main lever for huge mark alls, but SQLite's single writer and the GVL make it
   a measured optimisation rather than a default, so it is listed as future work.
@@ -160,8 +161,8 @@ Dirty linked lists and items (items only if their list is linked) are **compared
 
 - Coalescing: item tombstones of a list that is also being deleted are dropped with no call (the list `DELETE` removes its items), so
   deleting a 100k item list costs one request. A tombstone whose record is no longer in the snapshot costs no call either.
-- A failing `DELETE` keeps the tombstone, counts the attempt, stores the error and sets `next_attempt_at` with exponential backoff
-  (30 s doubling, capped at 1 h; jitter and a maximum number of attempts come with step 10). The record is **not resurrected** meanwhile:
+- A failing `DELETE` keeps the tombstone, counts the attempt, stores the error and sets `next_attempt_at` with the same
+  backoff, jitter and attempt limit as records (see "Resilience"; a 4xx makes it a dead letter at once). The record is **not resurrected** meanwhile:
   the pull skips remote records that have a tombstone (`stats["skipped_tombstoned"]`), and it logs `delete wins` at `warn` when the remote
   copy was edited after the local delete.
 
@@ -228,7 +229,7 @@ Three ways to run a cycle, all idempotent, all ending in the same `Runner`:
    last runs, the lock, dirty/unlinked records, pending tombstones and errors.
 
 - The job never raises. If the lock is taken it asks again instead of dropping the request; if the cycle aborted (the `GET` failed) or crashed it
-  reschedules with an exponential delay (30 s doubling, 15 min cap) based on consecutive failed runs.
+  reschedules with a jittered exponential delay (30 s doubling, 15 min cap) based on consecutive failed runs.
 - The sync is controlled by `config.x.todo_sync.enabled`: on in development and production so the whole flow can be exercised end to end, unless
   `TODO_SYNC_ENABLED=false` (do that with a huge local database: the first sync uploads everything, one `POST` per list), and **off in test** so the existing
   specs never enqueue `TodoSyncJob` or touch the network. Specs of the sync opt in with the `:todo_sync` tag.
@@ -302,12 +303,33 @@ Across cycles (the state lives in the database, so it survives restarts):
 
 ## Performance
 
-Planned: one `GET` per cycle; a list and its items are created in one `POST`; no-op `PATCH`es are skipped by diffing
-against the snapshot; tombstone coalescing; debounce to batch bursts; batched local writes (1000 rows).
+The API has no pagination, no `updated_since`, no bulk operations and no way to create an item in an existing list, so the cost is bounded by
+being smart about *when* to call it:
+
+| Situation | API calls | How |
+|---|---|---|
+| A cycle with nothing to do | **1** (`GET`) | The snapshot is the only read; every record is compared against it. |
+| A new list with N items | **1** `POST` | List and items go in one request; the returned ids are matched by `source_id`. |
+| Mark all of N items, M already completed remotely | **N - M** `PATCH`es | Each dirty record is diffed against the snapshot; equal ones are marked synced locally, in batches, with no call. |
+| Same value changed on both sides | **0** | Not a conflict. |
+| Delete a list with N items, or an item and then its list | **1** `DELETE` | The list `DELETE` removes its items, so item tombstones are dropped without a call. |
+| Delete something already gone remotely | **0** | The tombstone is dropped when the record is not in the snapshot. |
+| New items in a synced list (`recreate_list`) | **2** per list | One `POST` of the whole list, one `DELETE` of the old one, whatever the number of new items. |
+| A burst of local changes | **1** cycle | 5 s debounce; bulk writes ask for a sync once at the end. |
+| A flaky API | bounded | In-request retries only for idempotent calls, per-record backoff, circuit breaker after 5 consecutive failures. |
+
+All of these are checked in the specs through the request log of the fake API.
+
+Local costs: remote imports use `insert_all` in batches of 1000; sync state is written with one `UPDATE ... FROM (VALUES ...)` per 500 items; deleting a list is
+one SQL `DELETE`; the "what is dirty" query uses a partial index; long loops call `Thread.pass` and refresh the lock heartbeat because SQLite and the job share
+Puma's process.
+
+Known costs, accepted: the snapshot is loaded in memory (the `GET` cannot be paged; streaming the JSON is future work); a mark all of 100k items is 100k `PATCH`es
+because there is no bulk endpoint (suggested change below; bounded concurrency is future work); the first upload of a huge list is one big `POST`; SQLite allows a single writer.
 
 ## Edge cases
 
-Handled so far (each has a spec):
+Each of these has a spec:
 
 - Create and delete before any sync: no tombstone, no calls.
 - Deleting a synced list: one tombstone for the list and none for its items, without loading the items.
@@ -374,16 +396,38 @@ Handled so far (each has a spec):
 
 ## How to run
 
-The fake external API:
+There is no real external server, so the fake in `lib/fake_external_todo_api.rb` plays its role (in memory, same contract as the OpenAPI spec).
 
 ```bash
-bin/fake_external_api                    # http://localhost:4000, state in memory
-FAKE_SUPPORTS_ITEM_CREATION=true bin/fake_external_api   # also serves the proposed POST /todolists/:id/todoitems
-EXTERNAL_TODO_ITEM_CREATION=recreate_list|skip|api_endpoint bin/puma   # how new items in synced lists reach the API
-EXTERNAL_TODO_API_URL=http://localhost:4000 bin/puma   # the sync is on in development; TODO_SYNC_ENABLED=false turns it off
+bin/setup
+bin/fake_external_api                   # terminal 1: http://localhost:4000 (PORT to change it)
+bin/puma                                # terminal 2: the app on :3000, sync on, talking to http://localhost:4000
+bin/rails todo_sync:run                 # one cycle, synchronously, prints the summary
+bin/rails todo_sync:status              # last runs, lock, dirty/unlinked/dead records, tombstones
+bin/rails todo_sync:failed              # dead letters with their error
+bin/rails todo_sync:retry_failed        # put dead letters back in play
+bin/rspec                               # the whole suite
 ```
 
-Run one sync cycle (link, pull, push creates): `bin/rails todo_sync:run` (prints the run summary).
+Create, edit or delete lists and items through `/todolists` or `/api/todolists` and, within ~5 seconds, `curl localhost:4000/todolists` shows them. Create something
+in the fake with `curl -X POST localhost:4000/todolists ...` and run `bin/rails todo_sync:run` to see it appear locally.
 
-Tests: `bin/rspec` (the external API is faked in-process with WebMock; the sync is disabled in the test environment
-unless a spec enables it).
+Configuration (environment variables):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `EXTERNAL_TODO_API_URL` | `http://localhost:4000` | Base URL of the external API. |
+| `TODO_SYNC_ENABLED` | on (off in test) | `false` turns the automatic sync off (use it with a huge local database: the first sync uploads everything). |
+| `EXTERNAL_TODO_ITEM_CREATION` | `recreate_list` | How new items in synced lists reach the API: `recreate_list`, `skip` or `api_endpoint`. |
+| `FAKE_SUPPORTS_ITEM_CREATION` | `false` | Makes the fake serve the proposed `POST /todolists/:id/todoitems` (for `api_endpoint`). |
+
+Other settings (timeouts, retries, backoff, circuit breaker, guard thresholds, `recreate_max_items`) are in `config/initializers/external_todo.rb`.
+
+Periodic reconciliation (the safety net; pick the frequency you can accept for remote-to-local staleness):
+
+```cron
+*/5 * * * * cd /path/to/app && bin/rails todo_sync:run >> log/todo_sync_cron.log 2>&1
+```
+
+Tests: the external API is faked in-process with WebMock (`spec/support/external_todo_api.rb`), so the specs exercise the real HTTP stack, retries included.
+The sync is disabled in the test environment unless a spec is tagged `:todo_sync`.
